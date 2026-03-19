@@ -5,6 +5,7 @@ pub enum StopReason {
     MaxIterations,
     BudgetExhausted,
     ScorePlateau,
+    ScoreRegression,
     UserStopped,
     PerfectScore,
 }
@@ -15,6 +16,7 @@ impl std::fmt::Display for StopReason {
             Self::MaxIterations => write!(f, "Maximum iterations reached"),
             Self::BudgetExhausted => write!(f, "Token budget exhausted"),
             Self::ScorePlateau => write!(f, "Score plateau detected"),
+            Self::ScoreRegression => write!(f, "Score regression detected"),
             Self::UserStopped => write!(f, "Stopped by user"),
             Self::PerfectScore => write!(f, "Perfect score achieved"),
         }
@@ -26,7 +28,11 @@ pub struct ConvergenceChecker {
     plateau_window: usize,
     plateau_epsilon: f64,
     perfect_threshold: f64,
+    regression_threshold: f64,
+    best_score: f64,
     score_history: Vec<f64>,
+    consecutive_regressions: usize,
+    regression_exempt_until: usize,
 }
 
 impl ConvergenceChecker {
@@ -36,12 +42,29 @@ impl ConvergenceChecker {
             plateau_window: 3,
             plateau_epsilon: 0.01,
             perfect_threshold: 0.98,
+            regression_threshold: 0.10,
+            best_score: 0.0,
             score_history: Vec::new(),
+            consecutive_regressions: 0,
+            regression_exempt_until: 0,
         }
     }
 
     pub fn record_score(&mut self, score: f64) {
+        if !self.score_history.is_empty() && self.best_score - score > self.regression_threshold {
+            self.consecutive_regressions += 1;
+        } else {
+            self.consecutive_regressions = 0;
+        }
         self.score_history.push(score);
+        if score > self.best_score {
+            self.best_score = score;
+        }
+    }
+
+    /// Exempt an iteration from regression checks (e.g., after case regeneration).
+    pub fn exempt_from_regression(&mut self, iteration: usize) {
+        self.regression_exempt_until = iteration;
     }
 
     pub fn check(
@@ -77,6 +100,14 @@ impl ConvergenceChecker {
             if (max - min) < self.plateau_epsilon {
                 return Some(StopReason::ScorePlateau);
             }
+        }
+
+        // Check for regression: require 2 consecutive, skip if exempt
+        if self.score_history.len() >= 2
+            && iteration > self.regression_exempt_until
+            && self.consecutive_regressions >= 2
+        {
+            return Some(StopReason::ScoreRegression);
         }
 
         // Preemptive budget check

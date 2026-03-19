@@ -1,3 +1,5 @@
+use crate::claude::client::ClaudeClient;
+use crate::claude::models::Tier;
 use crate::error::Result;
 use crate::types::PersonaSpec;
 use std::path::Path;
@@ -38,6 +40,58 @@ pub fn generate_identity(spec: &PersonaSpec) -> String {
     }
 
     doc
+}
+
+pub async fn bootstrap_identity(
+    client: &ClaudeClient,
+    spec: &PersonaSpec,
+    reference: &str,
+) -> Result<String> {
+    let bare_identity = generate_identity(spec);
+
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "identity": { "type": "string" }
+        },
+        "required": ["identity"]
+    });
+
+    let prompt = format!(
+        r#"Expand this AI agent identity document. For each personality trait, add a brief behavioral definition (one line) explaining how this trait manifests in the agent's responses. Add a Communication Style section describing the agent's tone and formatting preferences. Keep the same markdown structure. Do not change the role, responsibility, or tools sections.
+
+## Identity Document
+{}
+
+## Reference Material
+{}"#,
+        bare_identity, reference
+    );
+
+    let response = client
+        .build(Tier::Planner, &prompt)
+        .with_json_schema(&schema.to_string())
+        .execute()
+        .await?;
+
+    match response.parse_json_result("Bootstrap") {
+        Ok(parsed) => Ok(parsed["identity"]
+            .as_str()
+            .unwrap_or(&bare_identity)
+            .to_string()),
+        Err(_) => {
+            // Model may have returned raw markdown instead of JSON
+            let text = response.result_text();
+            if text.len() > 50 && text.contains("##") {
+                tracing::warn!("Bootstrap returned raw markdown instead of JSON; using as identity");
+                Ok(text.to_string())
+            } else {
+                // Fall back to bare identity rather than failing the whole run
+                tracing::warn!("Bootstrap failed to parse; falling back to bare identity");
+                Ok(bare_identity)
+            }
+        }
+    }
 }
 
 pub fn write_identity(path: &Path, content: &str) -> Result<()> {

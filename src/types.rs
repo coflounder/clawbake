@@ -37,13 +37,25 @@ impl std::fmt::Display for PersonalityTrait {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ToolSpec {
     pub name: String,
     pub description: String,
     pub stub_behavior: Option<String>,
 }
 
+impl Default for ToolSpec {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: String::new(),
+            stub_behavior: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersonaSpec {
     pub name: String,
     pub role: String,
@@ -67,6 +79,7 @@ impl Default for PersonaSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EvalConfig {
     pub eval_count: usize,
     pub max_iterations: usize,
@@ -74,6 +87,7 @@ pub struct EvalConfig {
     pub max_parallel: usize,
     pub max_turns_per_case: u32,
     pub interactive: bool,
+    pub regen_interval: usize,
 }
 
 impl Default for EvalConfig {
@@ -85,11 +99,13 @@ impl Default for EvalConfig {
             max_parallel: 2,
             max_turns_per_case: 2,
             interactive: true,
+            regen_interval: 2,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ModelConfig {
     pub planner: String,
     pub optimizer: String,
@@ -103,7 +119,7 @@ impl Default for ModelConfig {
         Self {
             planner: "sonnet".to_string(),
             optimizer: "sonnet".to_string(),
-            evaluator: "haiku".to_string(),
+            evaluator: "sonnet".to_string(),
             persona: "haiku".to_string(),
             stub: "haiku".to_string(),
         }
@@ -111,6 +127,7 @@ impl Default for ModelConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OutputConfig {
     pub workspace_files: Vec<String>,
     pub format: OutputFormat,
@@ -125,9 +142,10 @@ impl Default for OutputConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
+    #[default]
     Single,
     Multi,
 }
@@ -176,7 +194,8 @@ pub struct EvalScore {
 
 impl EvalScore {
     pub fn compute_overall(fidelity: f64, quality: f64, efficiency: f64) -> f64 {
-        fidelity * 0.4 + quality * 0.4 + efficiency * 0.2
+        let result = fidelity * 0.4 + quality * 0.4 + efficiency * 0.2;
+        (result * 1000.0).round() / 1000.0
     }
 }
 
@@ -233,5 +252,7 @@ pub struct HistoryEntry {
     pub best_score: f64,
     pub mutation_summary: String,
     pub tokens_used: u64,
+    #[serde(default)]
+    pub tokens_delta: u64,
     pub timestamp: DateTime<Utc>,
 }

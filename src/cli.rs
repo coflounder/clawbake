@@ -22,6 +22,10 @@ pub enum Commands {
         /// Skip the wizard and use existing config
         #[arg(long)]
         no_wizard: bool,
+
+        /// Run without the TUI dashboard (log to stdout)
+        #[arg(long)]
+        headless: bool,
     },
 
     /// Show current status: best score, iteration count, budget

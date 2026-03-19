@@ -363,6 +363,7 @@ impl WizardState {
             max_parallel: self.config.max_parallel,
             max_turns_per_case: 2,
             interactive: true,
+            regen_interval: 2,
         };
 
         AppConfig {

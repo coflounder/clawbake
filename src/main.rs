@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Init => cmd_init(&state_dir).await?,
-        Commands::Run { no_wizard } => cmd_run(&state_dir, no_wizard).await?,
+        Commands::Run { no_wizard, headless } => cmd_run(&state_dir, no_wizard, headless).await?,
         Commands::Status => cmd_status(&state_dir)?,
         Commands::Export { output } => cmd_export(&state_dir, output)?,
     }
@@ -54,7 +54,7 @@ async fn cmd_init(state_dir: &StateDir) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_run(state_dir: &StateDir, no_wizard: bool) -> anyhow::Result<()> {
+async fn cmd_run(state_dir: &StateDir, no_wizard: bool, headless: bool) -> anyhow::Result<()> {
     if no_wizard {
         // No wizard — load config from file and run eval directly
         if !state_dir.config_path().exists() {
@@ -64,6 +64,11 @@ async fn cmd_run(state_dir: &StateDir, no_wizard: bool) -> anyhow::Result<()> {
             );
         }
         let config = AppConfig::load(&state_dir.config_path())?;
+        state_dir.init()?;
+        state_dir.clean_run_data()?;
+        if headless {
+            return run_eval_headless(state_dir, config).await;
+        }
         return run_eval_with_dashboard(state_dir, config).await;
     }
 
@@ -173,6 +178,79 @@ async fn run_eval_with_dashboard(
         Err(e) => println!("Eval loop error: {}", e),
     }
 
+    Ok(())
+}
+
+/// Run eval loop without TUI — log events to stdout.
+async fn run_eval_headless(
+    state_dir: &StateDir,
+    config: AppConfig,
+) -> anyhow::Result<()> {
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<EvalEvent>();
+
+    let budget = Arc::new(Mutex::new(TokenBudget::new(config.eval.max_budget_tokens)));
+    let client = claude::client::ClaudeClient::new(config.clone(), budget);
+    let runner = LoopRunner::new(
+        client,
+        config,
+        StateDir::new(state_dir.root().parent().unwrap_or(state_dir.root())),
+        event_tx,
+    );
+
+    let eval_handle = tokio::spawn(async move { runner.run().await });
+
+    // Drain events and print them
+    let printer = tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                EvalEvent::Log { message } => println!("  {}", message),
+                EvalEvent::IterationStarted { iteration } => {
+                    if iteration > 0 {
+                        println!("\n=== Iteration {} ===", iteration);
+                    }
+                }
+                EvalEvent::PlanningComplete { case_count } => {
+                    println!("  Planned {} eval cases", case_count);
+                }
+                EvalEvent::CaseComplete { case_id, score } => {
+                    println!("  {} => {:.3}", case_id, score);
+                }
+                EvalEvent::EvaluationComplete {
+                    iteration,
+                    average_score,
+                } => {
+                    println!("  Iteration {} avg: {:.3}", iteration, average_score);
+                }
+                EvalEvent::OptimizationComplete { mutation, .. } => {
+                    println!("  Mutation: {}", mutation);
+                }
+                EvalEvent::BudgetUpdate { consumed, limit } => {
+                    println!(
+                        "  Budget: {}K / {}K ({:.1}%)",
+                        consumed / 1000,
+                        limit / 1000,
+                        consumed as f64 / limit as f64 * 100.0
+                    );
+                }
+                EvalEvent::LoopComplete { reason, best_score } => {
+                    println!("\n=== Complete ===");
+                    println!("  Reason: {}", reason);
+                    println!("  Best score: {:.3}", best_score);
+                }
+                EvalEvent::Error { message } => {
+                    eprintln!("  ERROR: {}", message);
+                }
+                _ => {}
+            }
+        }
+    });
+
+    match eval_handle.await? {
+        Ok(reason) => println!("Eval loop completed: {}", reason),
+        Err(e) => println!("Eval loop error: {}", e),
+    }
+
+    drop(printer);
     Ok(())
 }
 

@@ -179,6 +179,7 @@ pub struct HeldContext {
     pub claude_md: Option<std::path::PathBuf>,
     pub agents_md: Option<std::path::PathBuf>,
     pub memory_md: Option<std::path::PathBuf>,
+    pub skills: Vec<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -276,10 +277,6 @@ pub struct EvalScore {
 }
 
 impl EvalScore {
-    pub fn compute_overall(fidelity: f64, quality: f64, efficiency: f64) -> f64 {
-        fidelity * 0.4 + quality * 0.4 + efficiency * 0.2
-    }
-
     pub fn compute_overall_weighted(fidelity: f64, quality: f64, efficiency: f64, weights: &ScoringWeights) -> f64 {
         fidelity * weights.persona_fidelity + quality * weights.task_quality + efficiency * weights.efficiency
     }
@@ -372,6 +369,7 @@ mod tests {
         assert!(held.claude_md.is_none());
         assert!(held.agents_md.is_none());
         assert!(held.memory_md.is_none());
+        assert!(held.skills.is_empty());
     }
 
     #[test]

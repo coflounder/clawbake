@@ -72,7 +72,8 @@ fn apply_mode_overrides(config: &mut AppConfig, mode: &Option<String>, hold: &[P
             "AGENTS.MD" => config.mode.hold_constant.agents_md = Some(path.clone()),
             "MEMORY.MD" => config.mode.hold_constant.memory_md = Some(path.clone()),
             _ => {
-                eprintln!("Warning: unrecognized hold file '{}', ignoring", path.display());
+                // Treat unrecognized files as skill/plugin hold-constant entries
+                config.mode.hold_constant.skills.push(path.clone());
             }
         }
     }
@@ -129,23 +130,7 @@ async fn cmd_run(state_dir: &StateDir, no_wizard: bool, mode: Option<String>, ho
 
         let mut config = config;
         // Apply CLI mode overrides in wizard path too
-        if let Some(mode_str) = &mode {
-            if let Ok(eval_mode) = mode_str.parse::<crate::types::EvalMode>() {
-                config.mode.target = eval_mode;
-            }
-        }
-        for path in &hold {
-            let filename = path.file_name()
-                .and_then(|f| f.to_str())
-                .unwrap_or("")
-                .to_uppercase();
-            match filename.as_str() {
-                "CLAUDE.MD" => config.mode.hold_constant.claude_md = Some(path.clone()),
-                "AGENTS.MD" => config.mode.hold_constant.agents_md = Some(path.clone()),
-                "MEMORY.MD" => config.mode.hold_constant.memory_md = Some(path.clone()),
-                _ => {}
-            }
-        }
+        apply_mode_overrides(&mut config, &mode, &hold)?;
 
         let budget = Arc::new(Mutex::new(TokenBudget::new(config.eval.max_budget_tokens)));
         let client = claude::client::ClaudeClient::new(config.clone(), budget);

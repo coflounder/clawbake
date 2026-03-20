@@ -40,10 +40,15 @@ impl MultiSessionResult {
 
 impl From<MultiSessionResult> for CaseResult {
     fn from(multi: MultiSessionResult) -> Self {
+        // Consider the case successful if at least one session completed without error.
+        let success = multi
+            .session_transcripts
+            .iter()
+            .any(|t| !t.starts_with("Error in session"));
         CaseResult {
             case_id: multi.case_id,
             transcript: multi.combined_transcript,
-            success: true,
+            success,
         }
     }
 }
@@ -247,12 +252,35 @@ mod tests {
     }
 
     #[test]
-    fn case_result_from_multi_session() {
+    fn case_result_from_multi_session_success() {
         let sessions = vec!["response 1".to_string(), "response 2".to_string()];
         let multi = MultiSessionResult::new("case-1".to_string(), sessions);
         let case_result: CaseResult = multi.into();
         assert_eq!(case_result.case_id, "case-1");
         assert!(case_result.success);
         assert!(case_result.transcript.contains("Session 1/2"));
+    }
+
+    #[test]
+    fn case_result_from_multi_session_all_errors() {
+        let sessions = vec![
+            "Error in session 1: timeout".to_string(),
+            "Error in session 2: timeout".to_string(),
+        ];
+        let multi = MultiSessionResult::new("case-2".to_string(), sessions);
+        let case_result: CaseResult = multi.into();
+        assert_eq!(case_result.case_id, "case-2");
+        assert!(!case_result.success, "all sessions errored — should not be success");
+    }
+
+    #[test]
+    fn case_result_from_multi_session_partial_errors() {
+        let sessions = vec![
+            "Error in session 1: timeout".to_string(),
+            "I am a helpful agent.".to_string(),
+        ];
+        let multi = MultiSessionResult::new("case-3".to_string(), sessions);
+        let case_result: CaseResult = multi.into();
+        assert!(case_result.success, "at least one session succeeded");
     }
 }

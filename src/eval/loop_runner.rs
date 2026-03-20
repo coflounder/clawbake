@@ -65,6 +65,18 @@ fn load_held_context(held: &crate::types::HeldContext) -> String {
         }
     }
 
+    for path in &held.skills {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            let label = path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or("skill");
+            context.push_str(&format!("---\n# Held Constant: {}\n", label));
+            context.push_str(&content);
+            context.push_str("\n---\n\n");
+        }
+    }
+
     context
 }
 

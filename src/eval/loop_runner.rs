@@ -11,7 +11,7 @@ use crate::sandbox::environment::SandboxEnvironment;
 use crate::types::HistoryEntry;
 use chrono::Utc;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 
 #[derive(Debug, Clone)]
 pub enum EvalEvent {
@@ -114,12 +114,13 @@ impl LoopRunner {
         self.log("Planning eval cases via claude -p --model sonnet...");
         let _ = self.event_tx.send(EvalEvent::IterationStarted { iteration: 0 });
 
-        let cases = match planner::generate_eval_cases(
+        let mut cases = match planner::generate_eval_cases(
             &self.client,
             &self.config.persona,
             &reference,
             self.config.eval.eval_count,
             &self.config.mode.target,
+            None,
         )
         .await
         {
@@ -143,11 +144,19 @@ impl LoopRunner {
 
         // Generate initial identity (mode-aware)
         let mut current_identity = match self.config.mode.target {
-            crate::types::EvalMode::Soul => identity::generate_soul(&self.config.persona),
-            _ => identity::generate_identity(&self.config.persona),
+            crate::types::EvalMode::Soul => {
+                self.log("Generating SOUL document from persona spec...");
+                identity::generate_soul(&self.config.persona)
+            }
+            _ => {
+                self.log("Bootstrapping identity with behavioral definitions...");
+                identity::bootstrap_identity(&self.client, &self.config.persona, &reference).await?
+            }
         };
+
         let mut convergence = ConvergenceChecker::new(self.config.eval.max_iterations);
         let mut best_score: f64 = 0.0;
+        let mut best_identity = current_identity.clone();
         let mut hist = history::load_history(&self.state_dir.history_path())?;
 
         // Load held-constant context
@@ -165,6 +174,8 @@ impl LoopRunner {
             }
         ));
 
+        let mut prev_tokens: u64 = 0;
+
         for iteration in 1..=self.config.eval.max_iterations {
             // Check user stop
             if *self.user_stopped.lock().await {
@@ -178,6 +189,26 @@ impl LoopRunner {
             let _ = self.event_tx.send(EvalEvent::IterationStarted { iteration });
 
             self.state_dir.ensure_iteration_dir(iteration)?;
+
+            // Regenerate cases if needed
+            if self.config.eval.regen_interval > 0
+                && iteration > 1
+                && (iteration - 1) % self.config.eval.regen_interval == 0
+            {
+                self.log("Regenerating eval cases...");
+                cases = planner::generate_eval_cases(
+                    &self.client,
+                    &self.config.persona,
+                    &reference,
+                    self.config.eval.eval_count,
+                    &self.config.mode.target,
+                    Some(&current_identity),
+                ).await?;
+                let cases_json = serde_json::to_string_pretty(&cases)?;
+                std::fs::write(self.state_dir.cases_path(), &cases_json)?;
+                self.log(format!("Regenerated {} eval cases", cases.len()));
+                convergence.exempt_from_regression(iteration);
+            }
 
             // Build system prompt: identity + held context for runners
             let system_prompt = if held_context.is_empty() {
@@ -231,48 +262,77 @@ impl LoopRunner {
                 }
             };
 
-            // Phase 3: Evaluate (uses current_identity without held context)
+            // Phase 3: Evaluate
             self.log("Evaluating transcripts...");
-            let mut scores = Vec::new();
+            let eval_semaphore = Arc::new(Semaphore::new(self.config.eval.max_parallel));
+            let mut eval_tasks = Vec::new();
+            let eval_mode = self.config.mode.target;
+
             for (case, result) in cases.iter().zip(case_results.iter()) {
-                let score = evaluator::evaluate_case(
+                // Build invocation before spawn (borrows &self.client)
+                let invocation = evaluator::build_eval_invocation(
                     &self.client,
                     case,
                     result,
                     &current_identity,
-                    &self.config.mode.target,
-                )
-                .await?;
+                    &eval_mode,
+                );
 
-                let _ = self.event_tx.send(EvalEvent::CaseComplete {
-                    case_id: case.id.clone(),
-                    score: score.overall,
-                });
+                let sem = eval_semaphore.clone();
+                let case_id = case.id.clone();
+                let tx = self.event_tx.clone();
+                let transcripts_dir = self.state_dir.iteration_transcripts_dir(iteration);
 
-                scores.push(score);
+                eval_tasks.push(tokio::spawn(async move {
+                    let _permit = sem.acquire().await.unwrap();
+
+                    let response = invocation.execute().await?;
+                    let (score, summary) = evaluator::parse_eval_response(&response, &case_id, &eval_mode)?;
+
+                    let _ = tx.send(EvalEvent::CaseComplete {
+                        case_id: case_id.clone(),
+                        score: score.overall,
+                    });
+
+                    // Save transcript summary
+                    let transcript_path = transcripts_dir.join(format!("{}.md", case_id));
+                    std::fs::write(&transcript_path, &summary)?;
+
+                    Ok::<_, crate::error::ClawbakeError>((score, case_id, summary))
+                }));
             }
 
-            // Summarize transcripts
-            self.log("Summarizing transcripts...");
-            for (case, result) in cases.iter().zip(case_results.iter()) {
-                let summary = evaluator::summarize_transcript(
-                    &self.client,
-                    &result.transcript,
-                    &case.title,
-                )
-                .await?;
-                let transcript_path = self
-                    .state_dir
-                    .iteration_transcripts_dir(iteration)
-                    .join(format!("{}.md", case.id));
-                std::fs::write(transcript_path, &summary)?;
+            // Collect results
+            let mut scores = Vec::new();
+            let mut transcripts: Vec<(String, String)> = Vec::new();
+            for handle in eval_tasks {
+                match handle.await {
+                    Ok(Ok((score, case_id, summary))) => {
+                        scores.push(score);
+                        transcripts.push((case_id, summary));
+                    }
+                    Ok(Err(e)) => {
+                        let _ = self.event_tx.send(EvalEvent::Error {
+                            message: format!("Evaluation failed: {}", e),
+                        });
+                        return Err(e);
+                    }
+                    Err(e) => {
+                        let msg = format!("Evaluation task panicked: {}", e);
+                        let _ = self.event_tx.send(EvalEvent::Error {
+                            message: msg.clone(),
+                        });
+                        return Err(crate::error::ClawbakeError::Eval(msg));
+                    }
+                }
             }
 
-            // Compute average
+            // Compute average (round to 4 decimal places to avoid IEEE artifacts)
             let avg_score = if scores.is_empty() {
                 0.0
             } else {
-                scores.iter().map(|s| s.overall).sum::<f64>() / scores.len() as f64
+                let raw = scores.iter().map(|s| s.overall).sum::<f64>() / scores.len() as f64;
+                (raw * 10000.0).round() / 10000.0
             };
 
             // Save scores
@@ -290,6 +350,7 @@ impl LoopRunner {
             // Update best (mode-aware path)
             if avg_score > best_score {
                 best_score = avg_score;
+                best_identity = current_identity.clone();
                 let best_path = match self.config.mode.target {
                     crate::types::EvalMode::Soul => self.state_dir.best_soul_path(),
                     _ => self.state_dir.best_identity_path(),
@@ -329,15 +390,25 @@ impl LoopRunner {
                 }
             }
 
-            // Phase 5: Optimize (uses current_identity without held context)
-            self.log("Optimizing identity document...");
+            // Phase 5: Optimize
+            // Anchor to best identity when regressing, otherwise use current
+            let optimization_base = if avg_score < best_score {
+                self.log("Score regressed — optimizing from best identity...");
+                &best_identity
+            } else {
+                self.log("Optimizing identity document...");
+                &current_identity
+            };
             let opt_result = optimizer::optimize_identity(
                 &self.client,
-                &current_identity,
+                optimization_base,
                 &scores,
+                &transcripts,
                 &hist,
                 &reference,
                 &self.config.mode.target,
+                avg_score < best_score,
+                &self.config.models.persona,
             )
             .await?;
 
@@ -357,6 +428,9 @@ impl LoopRunner {
             });
 
             // Append history
+            let consumed = self.client.budget().lock().await.consumed;
+            let tokens_delta = consumed - prev_tokens;
+            prev_tokens = consumed;
             let entry = HistoryEntry {
                 iteration,
                 average_score: avg_score,
@@ -365,7 +439,8 @@ impl LoopRunner {
                     .map(|s| s.overall)
                     .fold(0.0_f64, f64::max),
                 mutation_summary: opt_result.mutation_summary,
-                tokens_used: self.client.budget().lock().await.consumed,
+                tokens_used: consumed,
+                tokens_delta,
                 timestamp: Utc::now(),
             };
             hist.push(entry.clone());

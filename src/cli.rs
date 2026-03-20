@@ -30,6 +30,10 @@ pub enum Commands {
         /// Context files to hold constant during evaluation (can be repeated)
         #[arg(long)]
         hold: Vec<PathBuf>,
+
+        /// Run without the TUI dashboard (log to stdout)
+        #[arg(long)]
+        headless: bool,
     },
 
     /// Show current status: best score, iteration count, budget

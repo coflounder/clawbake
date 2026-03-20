@@ -81,7 +81,9 @@ Reference material:
 
 Generate a diverse mix of categories: core_task, personality_probe, edge_case, guardrail_test, and tool_usage.
 Each case should test a different aspect of the persona. The prompt field should be a realistic user message that would be sent to this agent.
-Expected behaviors should be specific, observable things the agent should do or say."#,
+Expected behaviors should be specific, observable things the agent should do or say.
+
+Important: For tool_usage cases, the agent runs in an isolated sandbox directory. Only test tools that can function without pre-existing files (e.g., WebSearch, WebFetch, Bash commands that generate output). Do NOT create cases that require reading or editing files that don't exist in the sandbox."#,
             eval_count, persona_summary, reference
         ),
     }
@@ -93,7 +95,18 @@ pub async fn generate_eval_cases(
     reference: &str,
     eval_count: usize,
     mode: &EvalMode,
+    current_identity: Option<&str>,
 ) -> Result<Vec<EvalCase>> {
+    let eval_count = if eval_count < 5 {
+        tracing::warn!(
+            "eval_count {} is below minimum of 5; using 5",
+            eval_count
+        );
+        5
+    } else {
+        eval_count
+    };
+
     let schema = build_planner_schema(mode);
 
     let persona_summary = format!(
@@ -106,7 +119,15 @@ pub async fn generate_eval_cases(
         spec.guardrails.join("; "),
     );
 
-    let prompt = build_planner_prompt(mode, &persona_summary, reference, eval_count);
+    let identity_context = match current_identity {
+        Some(id) => format!(
+            "\n\nThe agent currently uses this identity document. Generate cases that probe its weaknesses and verify its strengths:\n\n{}",
+            id
+        ),
+        None => String::new(),
+    };
+
+    let prompt = format!("{}{}", build_planner_prompt(mode, &persona_summary, reference, eval_count), identity_context);
 
     let response = client
         .build(Tier::Planner, &prompt)

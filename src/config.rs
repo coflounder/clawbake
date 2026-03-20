@@ -38,6 +38,7 @@ impl Default for ModeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppConfig {
     pub persona: PersonaSpec,
     pub eval: EvalConfig,

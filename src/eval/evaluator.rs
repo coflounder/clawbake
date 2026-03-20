@@ -1,5 +1,5 @@
-use crate::claude::client::ClaudeClient;
-use crate::claude::models::Tier;
+use crate::claude::client::{ClaudeClient, ClaudeInvocation};
+use crate::claude::models::{ClaudeResponse, Tier};
 use crate::error::Result;
 use crate::types::{EvalCase, EvalMode, EvalScore, ScoringWeights};
 use crate::eval::runner::CaseResult;
@@ -36,7 +36,9 @@ Score each dimension from 0.0 to 1.0:
 
 Weight persona_fidelity most heavily. This is a soul evaluation — identity coherence is the primary signal.
 
-Provide a brief rationale explaining your scores."#,
+Provide a brief rationale explaining your scores.
+
+Also provide a concise summary (under 200 words) of the transcript focusing on: decisions made, tools used, personality expression, any issues."#,
             identity, title, description, category, expected_behaviors, transcript
         ),
         _ => format!(
@@ -59,30 +61,38 @@ Score each dimension from 0.0 to 1.0:
 - task_quality: How well does the response accomplish the task described in the test case?
 - efficiency: How concise and focused is the response? Does it avoid unnecessary verbosity?
 
-Provide a brief rationale explaining your scores."#,
+Provide a brief rationale explaining your scores.
+
+Also provide a concise summary (under 200 words) of the transcript focusing on: decisions made, tools used, personality expression, any issues."#,
             identity, title, description, category, expected_behaviors, transcript
         ),
     }
 }
 
-pub async fn evaluate_case(
-    client: &ClaudeClient,
-    case: &EvalCase,
-    result: &CaseResult,
-    identity: &str,
-    mode: &EvalMode,
-) -> Result<EvalScore> {
-    let schema = serde_json::json!({
+fn eval_schema() -> serde_json::Value {
+    serde_json::json!({
         "type": "object",
         "properties": {
             "persona_fidelity": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
             "task_quality": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
             "efficiency": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
-            "rationale": { "type": "string" }
+            "rationale": { "type": "string" },
+            "summary": { "type": "string" }
         },
-        "required": ["persona_fidelity", "task_quality", "efficiency", "rationale"]
-    });
+        "required": ["persona_fidelity", "task_quality", "efficiency", "rationale", "summary"]
+    })
+}
 
+/// Build a ClaudeInvocation for evaluation. This borrows &ClaudeClient but returns
+/// an owned invocation that can be moved into a spawned task.
+pub fn build_eval_invocation(
+    client: &ClaudeClient,
+    case: &EvalCase,
+    result: &CaseResult,
+    identity: &str,
+    mode: &EvalMode,
+) -> ClaudeInvocation {
+    let schema = eval_schema();
     let prompt = build_evaluator_prompt(
         mode,
         identity,
@@ -93,27 +103,50 @@ pub async fn evaluate_case(
         &result.transcript,
     );
 
-    let response = client
+    client
         .build(Tier::Evaluator, &prompt)
         .with_json_schema(&schema.to_string())
-        .execute()
-        .await?;
+}
 
+/// Parse a ClaudeResponse from an evaluation invocation into an EvalScore and summary.
+pub fn parse_eval_response(
+    response: &ClaudeResponse,
+    case_id: &str,
+    mode: &EvalMode,
+) -> Result<(EvalScore, String)> {
     let parsed = response.parse_json_result("Evaluator")?;
 
     let fidelity = parsed["persona_fidelity"].as_f64().unwrap_or(0.0);
     let quality = parsed["task_quality"].as_f64().unwrap_or(0.0);
     let efficiency = parsed["efficiency"].as_f64().unwrap_or(0.0);
+    let summary = parsed["summary"].as_str().unwrap_or("").to_string();
     let weights = ScoringWeights::for_mode(mode);
 
-    Ok(EvalScore {
-        case_id: case.id.clone(),
-        persona_fidelity: fidelity,
-        task_quality: quality,
-        efficiency,
-        overall: EvalScore::compute_overall_weighted(fidelity, quality, efficiency, &weights),
-        rationale: parsed["rationale"].as_str().unwrap_or("").to_string(),
-    })
+    Ok((
+        EvalScore {
+            case_id: case_id.to_string(),
+            persona_fidelity: fidelity,
+            task_quality: quality,
+            efficiency,
+            overall: EvalScore::compute_overall_weighted(fidelity, quality, efficiency, &weights),
+            rationale: parsed["rationale"].as_str().unwrap_or("").to_string(),
+        },
+        summary,
+    ))
+}
+
+/// Evaluate a case end-to-end (builds invocation, executes, parses).
+/// Returns (EvalScore, summary).
+pub async fn evaluate_case(
+    client: &ClaudeClient,
+    case: &EvalCase,
+    result: &CaseResult,
+    identity: &str,
+    mode: &EvalMode,
+) -> Result<(EvalScore, String)> {
+    let invocation = build_eval_invocation(client, case, result, identity, mode);
+    let response = invocation.execute().await?;
+    parse_eval_response(&response, &case.id, mode)
 }
 
 pub async fn summarize_transcript(

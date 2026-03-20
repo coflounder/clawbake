@@ -89,4 +89,32 @@ impl StateDir {
         std::fs::create_dir_all(self.iteration_transcripts_dir(iteration))?;
         Ok(())
     }
+
+    /// Clear stale run data so fresh runs don't pollute each other.
+    /// Preserves config.toml and reference.md.
+    pub fn clean_run_data(&self) -> Result<()> {
+        let runs = self.runs_dir();
+        if runs.exists() {
+            std::fs::remove_dir_all(&runs)?;
+        }
+        std::fs::create_dir_all(&runs)?;
+
+        let history = self.history_path();
+        if history.exists() {
+            std::fs::remove_file(&history)?;
+        }
+
+        let best = self.best_dir();
+        if best.exists() {
+            std::fs::remove_dir_all(&best)?;
+        }
+        std::fs::create_dir_all(&best)?;
+
+        let cases = self.cases_path();
+        if cases.exists() {
+            std::fs::remove_file(&cases)?;
+        }
+
+        Ok(())
+    }
 }

@@ -1,0 +1,210 @@
+name: Eval Matrix (All Modes)
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'src/**'
+      - '.clawbake/**'
+      - '.github/workflows/eval-matrix.yml'
+      - 'Cargo.toml'
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build clawbake
+        run: cargo build --release
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v3
+        with:
+          name: clawbake-binary
+          path: target/release/clawbake
+          retention-days: 1
+
+  eval:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        mode: [soul, claude, agents, memory, skills]
+        include:
+          - mode: soul
+            iterations: '5'
+            timeout: 30
+          - mode: claude
+            iterations: '3'
+            timeout: 20
+          - mode: agents
+            iterations: '3'
+            timeout: 20
+          - mode: memory
+            iterations: '2'
+            timeout: 15
+          - mode: skills
+            iterations: '2'
+            timeout: 15
+    
+    permissions:
+      contents: read
+      pull-requests: write
+    
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download clawbake binary
+        uses: actions/download-artifact@v3
+        with:
+          name: clawbake-binary
+          path: .
+
+      - name: Make binary executable
+        run: chmod +x clawbake
+
+      - name: Setup Claude API
+        uses: anthropics/claude-code-action@v1
+        with:
+          api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Validate config
+        run: |
+          if [ ! -f ".clawbake/config.toml" ]; then
+            echo "❌ No .clawbake/config.toml found"
+            exit 1
+          fi
+          echo "✓ Config validated"
+
+      - name: Run ${{ matrix.mode }} eval
+        id: eval
+        timeout-minutes: ${{ matrix.timeout }}
+        continue-on-error: true
+        run: |
+          echo "🧠 Starting ${{ matrix.mode }} eval (max ${{ matrix.iterations }} iterations)"
+          
+          ./clawbake run \
+            --mode "${{ matrix.mode }}" \
+            --headless \
+            --no-wizard \
+            2>&1 | tee eval-${{ matrix.mode }}.log
+          
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+          exit $EXIT_CODE
+
+      - name: Export results
+        if: always()
+        continue-on-error: true
+        run: |
+          ./clawbake export -o ./eval-${{ matrix.mode }}-output || true
+          
+          # Prepare summary
+          if [ -f ".clawbake/best/SOUL.md" ]; then
+            {
+              echo "## ${{ matrix.mode }} Eval Results"
+              echo ""
+              echo "### Best Identity"
+              echo '```markdown'
+              head -30 .clawbake/best/SOUL.md
+              echo '```'
+              echo ""
+              
+              if [ -f ".clawbake/best/scores.json" ]; then
+                echo "### Scores"
+                echo '```json'
+                cat .clawbake/best/scores.json | jq '.' || cat .clawbake/best/scores.json
+                echo '```'
+              fi
+            } > eval-${{ matrix.mode }}-summary.md
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: eval-${{ matrix.mode }}-results
+          path: |
+            eval-${{ matrix.mode }}.log
+            eval-${{ matrix.mode }}-output/
+            eval-${{ matrix.mode }}-summary.md
+          retention-days: 30
+
+      - name: Report results
+        if: always()
+        run: |
+          echo "## ${{ matrix.mode }} Mode - Status"
+          echo ""
+          
+          if [ -f eval-${{ matrix.mode }}.log ]; then
+            BEST_SCORE=$(grep "Best score:" eval-${{ matrix.mode }}.log | tail -1 | awk '{print $NF}')
+            if [ -n "$BEST_SCORE" ]; then
+              echo "**Best Score:** \`$BEST_SCORE\`"
+            fi
+            
+            ITERATIONS=$(grep "Iteration" eval-${{ matrix.mode }}.log | wc -l)
+            echo "**Iterations:** $ITERATIONS"
+          fi
+          
+          if [ ${{ steps.eval.outputs.exit_code }} -eq 0 ]; then
+            echo "**Status:** ✅ Success"
+          else
+            echo "**Status:** ❌ Failed (code ${{ steps.eval.outputs.exit_code }})"
+          fi
+          
+          echo ""
+          echo "### Last 30 lines of log"
+          echo '```'
+          tail -30 eval-${{ matrix.mode }}.log || echo "No log found"
+          echo '```'
+          
+          >> $GITHUB_STEP_SUMMARY
+
+  summary:
+    needs: eval
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+
+      - name: Generate summary
+        run: |
+          echo "# Eval Matrix Results"
+          echo ""
+          
+          for mode in soul claude agents memory skills; do
+            if [ -f "eval-${mode}-results/eval-${mode}-summary.md" ]; then
+              cat "eval-${mode}-results/eval-${mode}-summary.md"
+              echo ""
+            fi
+          done > eval-summary.md
+          
+          cat eval-summary.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            if (fs.existsSync('eval-summary.md')) {
+              const summary = fs.readFileSync('eval-summary.md', 'utf8');
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: '## 🧠 Eval Matrix Results\n\n' + summary
+              });
+            }

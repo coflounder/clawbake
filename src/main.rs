@@ -29,6 +29,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Init => cmd_init(&state_dir).await?,
+        Commands::InitConfig { config } => cmd_init_config(&state_dir, config).await?,
         Commands::Run { no_wizard, mode, hold, headless } => cmd_run(&state_dir, no_wizard, mode, hold, headless).await?,
         Commands::Status => cmd_status(&state_dir)?,
         Commands::Export { output } => cmd_export(&state_dir, output)?,
@@ -50,6 +51,28 @@ async fn cmd_init(state_dir: &StateDir) -> anyhow::Result<()> {
     } else {
         println!("Setup cancelled.");
     }
+
+    Ok(())
+}
+
+async fn cmd_init_config(state_dir: &StateDir, config_path: PathBuf) -> anyhow::Result<()> {
+    // Non-interactive initialization from config file
+    if !config_path.exists() {
+        anyhow::bail!(
+            "Config file not found: {}",
+            config_path.display()
+        );
+    }
+
+    let config = AppConfig::load(&config_path)?;
+    state_dir.init()?;
+    config.save(&state_dir.config_path())?;
+
+    println!("✓ Project initialized at {}", state_dir.root().display());
+    println!("✓ Persona: {}", config.persona.name);
+    println!("✓ Role: {}", config.persona.role);
+    println!("✓ Mode: {}", config.mode.target);
+    println!("✓ Config saved to {}", state_dir.config_path().display());
 
     Ok(())
 }

@@ -1,0 +1,151 @@
+diff --git a/src/eval/loop_runner.rs b/src/eval/loop_runner.rs
+index 9f9e0f7..6fa7399 100644
+--- a/src/eval/loop_runner.rs
++++ b/src/eval/loop_runner.rs
+@@ -65,6 +65,18 @@ fn load_held_context(held: &crate::types::HeldContext) -> String {
+         }
+     }
+ 
++    for path in &held.skills {
++        if let Ok(content) = std::fs::read_to_string(path) {
++            let label = path
++                .file_name()
++                .and_then(|f| f.to_str())
++                .unwrap_or("skill");
++            context.push_str(&format!("---\n# Held Constant: {}\n", label));
++            context.push_str(&content);
++            context.push_str("\n---\n\n");
++        }
++    }
++
+     context
+ }
+ 
+diff --git a/src/eval/runner.rs b/src/eval/runner.rs
+index 0933932..9d224fc 100644
+--- a/src/eval/runner.rs
++++ b/src/eval/runner.rs
+@@ -40,10 +40,15 @@ impl MultiSessionResult {
+ 
+ impl From<MultiSessionResult> for CaseResult {
+     fn from(multi: MultiSessionResult) -> Self {
++        // Consider the case successful if at least one session completed without error.
++        let success = multi
++            .session_transcripts
++            .iter()
++            .any(|t| !t.starts_with("Error in session"));
+         CaseResult {
+             case_id: multi.case_id,
+             transcript: multi.combined_transcript,
+-            success: true,
++            success,
+         }
+     }
+ }
+@@ -247,7 +252,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn case_result_from_multi_session() {
++    fn case_result_from_multi_session_success() {
+         let sessions = vec!["response 1".to_string(), "response 2".to_string()];
+         let multi = MultiSessionResult::new("case-1".to_string(), sessions);
+         let case_result: CaseResult = multi.into();
+@@ -255,4 +260,27 @@ mod tests {
+         assert!(case_result.success);
+         assert!(case_result.transcript.contains("Session 1/2"));
+     }
++
++    #[test]
++    fn case_result_from_multi_session_all_errors() {
++        let sessions = vec![
++            "Error in session 1: timeout".to_string(),
++            "Error in session 2: timeout".to_string(),
++        ];
++        let multi = MultiSessionResult::new("case-2".to_string(), sessions);
++        let case_result: CaseResult = multi.into();
++        assert_eq!(case_result.case_id, "case-2");
++        assert!(!case_result.success, "all sessions errored — should not be success");
++    }
++
++    #[test]
++    fn case_result_from_multi_session_partial_errors() {
++        let sessions = vec![
++            "Error in session 1: timeout".to_string(),
++            "I am a helpful agent.".to_string(),
++        ];
++        let multi = MultiSessionResult::new("case-3".to_string(), sessions);
++        let case_result: CaseResult = multi.into();
++        assert!(case_result.success, "at least one session succeeded");
++    }
+ }
+diff --git a/src/main.rs b/src/main.rs
+index 9ca4650..264c6e0 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -72,7 +72,8 @@ fn apply_mode_overrides(config: &mut AppConfig, mode: &Option<String>, hold: &[P
+             "AGENTS.MD" => config.mode.hold_constant.agents_md = Some(path.clone()),
+             "MEMORY.MD" => config.mode.hold_constant.memory_md = Some(path.clone()),
+             _ => {
+-                eprintln!("Warning: unrecognized hold file '{}', ignoring", path.display());
++                // Treat unrecognized files as skill/plugin hold-constant entries
++                config.mode.hold_constant.skills.push(path.clone());
+             }
+         }
+     }
+@@ -129,23 +130,7 @@ async fn cmd_run(state_dir: &StateDir, no_wizard: bool, mode: Option<String>, ho
+ 
+         let mut config = config;
+         // Apply CLI mode overrides in wizard path too
+-        if let Some(mode_str) = &mode {
+-            if let Ok(eval_mode) = mode_str.parse::<crate::types::EvalMode>() {
+-                config.mode.target = eval_mode;
+-            }
+-        }
+-        for path in &hold {
+-            let filename = path.file_name()
+-                .and_then(|f| f.to_str())
+-                .unwrap_or("")
+-                .to_uppercase();
+-            match filename.as_str() {
+-                "CLAUDE.MD" => config.mode.hold_constant.claude_md = Some(path.clone()),
+-                "AGENTS.MD" => config.mode.hold_constant.agents_md = Some(path.clone()),
+-                "MEMORY.MD" => config.mode.hold_constant.memory_md = Some(path.clone()),
+-                _ => {}
+-            }
+-        }
++        apply_mode_overrides(&mut config, &mode, &hold)?;
+ 
+         let budget = Arc::new(Mutex::new(TokenBudget::new(config.eval.max_budget_tokens)));
+         let client = claude::client::ClaudeClient::new(config.clone(), budget);
+diff --git a/src/types.rs b/src/types.rs
+index 2bf6353..8e635aa 100644
+--- a/src/types.rs
++++ b/src/types.rs
+@@ -179,6 +179,7 @@ pub struct HeldContext {
+     pub claude_md: Option<std::path::PathBuf>,
+     pub agents_md: Option<std::path::PathBuf>,
+     pub memory_md: Option<std::path::PathBuf>,
++    pub skills: Vec<std::path::PathBuf>,
+ }
+ 
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+@@ -276,10 +277,6 @@ pub struct EvalScore {
+ }
+ 
+ impl EvalScore {
+-    pub fn compute_overall(fidelity: f64, quality: f64, efficiency: f64) -> f64 {
+-        fidelity * 0.4 + quality * 0.4 + efficiency * 0.2
+-    }
+-
+     pub fn compute_overall_weighted(fidelity: f64, quality: f64, efficiency: f64, weights: &ScoringWeights) -> f64 {
+         fidelity * weights.persona_fidelity + quality * weights.task_quality + efficiency * weights.efficiency
+     }
+@@ -372,6 +369,7 @@ mod tests {
+         assert!(held.claude_md.is_none());
+         assert!(held.agents_md.is_none());
+         assert!(held.memory_md.is_none());
++        assert!(held.skills.is_empty());
+     }
+ 
+     #[test]

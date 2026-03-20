@@ -1,0 +1,183 @@
+name: Soul Eval Mode
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - '.clawbake/**'
+      - '.github/workflows/soul-eval.yml'
+      - 'Cargo.toml'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Eval mode'
+        required: true
+        default: 'soul'
+        type: choice
+        options:
+          - soul
+          - claude
+          - agents
+          - memory
+          - skills
+      iterations:
+        description: 'Max iterations'
+        required: false
+        default: '3'
+        type: string
+
+jobs:
+  soul-eval:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./
+
+      - name: Build clawbake
+        run: |
+          cargo build --release
+          echo "CLAWBAKE_BIN=$(pwd)/target/release/clawbake" >> $GITHUB_ENV
+
+      - name: Authenticate with Claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Prepare eval environment
+        run: |
+          # Set eval mode from input or default to soul
+          MODE="${{ inputs.mode || 'soul' }}"
+          ITERATIONS="${{ inputs.iterations || '3' }}"
+          
+          # Get current config
+          if [ ! -f ".clawbake/config.toml" ]; then
+            echo "❌ No .clawbake/config.toml found. Please initialize with: clawbake init"
+            exit 1
+          fi
+          
+          # Store config for next step
+          echo "EVAL_MODE=$MODE" >> $GITHUB_ENV
+          echo "MAX_ITERATIONS=$ITERATIONS" >> $GITHUB_ENV
+
+      - name: Run soul eval
+        run: |
+          echo "🧠 Running ${{ env.EVAL_MODE }} eval mode (max ${{ env.MAX_ITERATIONS }} iterations)"
+          
+          # Run in headless mode for CI
+          ${{ env.CLAWBAKE_BIN }} run \
+            --mode "${{ env.EVAL_MODE }}" \
+            --headless \
+            --no-wizard 2>&1 | tee eval-output.log
+          
+          # Capture exit code
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "EVAL_EXIT_CODE=$EXIT_CODE" >> $GITHUB_ENV
+          
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ Eval failed with code $EXIT_CODE"
+            exit $EXIT_CODE
+          fi
+
+      - name: Export results
+        if: success() || failure()
+        run: |
+          echo "📊 Exporting eval results..."
+          ${{ env.CLAWBAKE_BIN }} export -o ./eval-output
+          
+          # Copy status for artifact
+          if [ -f ".clawbake/best/scores.json" ]; then
+            cp .clawbake/best/scores.json eval-output/scores.json
+          fi
+          
+          # Create summary for PR comment
+          if [ -f ".clawbake/best/SOUL.md" ]; then
+            echo "## ✨ Soul Eval Complete" > eval-summary.md
+            echo "" >> eval-summary.md
+            echo "### Best SOUL.md" >> eval-summary.md
+            echo "\`\`\`markdown" >> eval-summary.md
+            head -50 .clawbake/best/SOUL.md >> eval-summary.md
+            echo "\`\`\`" >> eval-summary.md
+            
+            if [ -f ".clawbake/best/scores.json" ]; then
+              echo "" >> eval-summary.md
+              echo "### Scores" >> eval-summary.md
+              echo "\`\`\`json" >> eval-summary.md
+              cat .clawbake/best/scores.json >> eval-summary.md
+              echo "\`\`\`" >> eval-summary.md
+            fi
+          fi
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request' && (success() || failure())
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            if (fs.existsSync('eval-summary.md')) {
+              const summary = fs.readFileSync('eval-summary.md', 'utf8');
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: summary
+              });
+            }
+
+      - name: Upload eval artifacts
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: soul-eval-results
+          path: |
+            eval-output/
+            eval-output.log
+            eval-summary.md
+          retention-days: 30
+
+      - name: Check convergence
+        if: success()
+        run: |
+          echo "✅ Eval converged successfully"
+          
+          # Extract best score from log
+          BEST_SCORE=$(grep "Best score:" eval-output.log | tail -1 | awk '{print $NF}')
+          echo "**Best Score:** $BEST_SCORE" >> $GITHUB_STEP_SUMMARY
+          
+          # Check if SOUL.md was improved
+          if [ -f ".clawbake/best/SOUL.md" ]; then
+            echo "**Output:** SOUL.md optimized" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Report status
+        if: always()
+        run: |
+          echo "## Soul Eval Status"
+          echo ""
+          echo "Exit Code: ${{ env.EVAL_EXIT_CODE }}"
+          echo "Mode: ${{ env.EVAL_MODE }}"
+          echo "Max Iterations: ${{ env.MAX_ITERATIONS }}"
+          echo ""
+          
+          if [ -f eval-output.log ]; then
+            echo "### Output (last 50 lines)"
+            echo "\`\`\`"
+            tail -50 eval-output.log
+            echo "\`\`\`"
+          fi >> $GITHUB_STEP_SUMMARY

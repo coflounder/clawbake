@@ -1,11 +1,110 @@
 use crate::claude::client::ClaudeClient;
 use crate::claude::models::Tier;
 use crate::error::Result;
-use crate::types::{EvalScore, HistoryEntry};
+use crate::types::{EvalMode, EvalScore, HistoryEntry};
 
 pub struct OptimizationResult {
     pub new_identity: String,
     pub mutation_summary: String,
+}
+
+pub fn build_optimizer_prompt(
+    mode: &EvalMode,
+    current_identity: &str,
+    scores_summary: &str,
+    transcripts_summary: &str,
+    history_summary: &str,
+    reference: &str,
+    is_regression: bool,
+    persona_model: &str,
+) -> String {
+    let regression_note = if is_regression {
+        "\n\nIMPORTANT: The current iteration scored below the best. You are working from the best-scoring identity. Focus on targeted improvements that avoid the regression seen in recent iterations. The previous optimization added too many rules — consider simplifying instead.\n"
+    } else {
+        ""
+    };
+
+    match mode {
+        EvalMode::Soul => format!(
+            r#"You are a SOUL.md optimizer. Your job is to refine an AI agent's deep identity document — its values, voice, worldview, and behavioral principles.
+
+## Current SOUL Document
+{identity}
+
+## Evaluation Scores
+{scores}
+
+## Transcript Summaries
+{transcripts}
+
+## History of Previous Iterations
+{history}
+
+## Reference Material
+{reference}
+{regression}
+Analyze the scores, rationales, and transcript summaries. Improve the SOUL document following these rules:
+1. Mutations target prose, not structure. SOUL.md is a narrative document. Rewrite sections for clarity and specificity — do NOT add bullet points or restructure into lists.
+2. Strengthen voice: If voice_preservation scores are low, make the personality description more vivid and distinctive.
+3. Sharpen values: If value_conflict scores are low, make value hierarchies explicit ("thoroughness over speed").
+4. Add boundary language: If boundary_holding scores are low, add clear statements about what this agent is NOT.
+5. Avoid anti-patterns: Don't make the soul too vague ("be helpful") or too rigid ("always respond in exactly 3 paragraphs").
+6. Keep the core identity intact — refine, don't reinvent.
+7. The mutation_summary should be a one-line description of what you changed and what you removed
+8. If a rule was added in a previous iteration and scores did not improve or worsened, REMOVE it. Pruning ineffective rules is as important as adding new ones
+9. Keep the total SOUL document under 800 words. If adding a section would exceed this, consolidate or remove less effective sections first
+10. The persona agent runs on model tier "{model}". Smaller models need simpler, clearer instructions — prefer vivid, concrete descriptions over complex conditional rules
+
+Return the complete updated SOUL document and a summary of mutations."#,
+            identity = current_identity,
+            scores = scores_summary,
+            transcripts = transcripts_summary,
+            history = history_summary,
+            reference = reference,
+            regression = regression_note,
+            model = persona_model,
+        ),
+        _ => format!(
+            r#"You are an identity prompt optimizer. Your job is to improve an AI agent's system prompt based on evaluation results.
+
+## Current Identity
+{identity}
+
+## Evaluation Scores
+{scores}
+
+## Transcript Summaries
+{transcripts}
+
+## History of Previous Iterations
+{history}
+
+## Reference Material
+{reference}
+{regression}
+Analyze the scores, rationales, and transcript summaries. Identify weaknesses and improve the identity document.
+
+Rules:
+1. Preserve the markdown structure (headings, lists)
+2. Make targeted, specific changes — don't rewrite everything
+3. Focus on the lowest-scoring dimensions
+4. Keep the core role and personality intact
+5. The mutation_summary should be a one-line description of what you changed and what you removed
+6. If a rule was added in a previous iteration and scores did not improve or worsened, REMOVE it. Pruning ineffective rules is as important as adding new ones
+7. Keep the total identity document under 800 words. If adding a rule would exceed this, remove or consolidate a less effective rule first
+8. The persona agent runs on model tier "{model}". Smaller models need simpler, clearer instructions — avoid complex conditional rules, multi-step procedural instructions, or rules with many exceptions. Prefer one clear directive over three nuanced ones
+9. If a case consistently scores below 0.5 across multiple iterations despite identity changes, the failure is likely a model capability limit, not an identity problem. Do not add more rules targeting that case — focus optimization budget on cases where identity changes can actually help
+
+Return the complete updated identity document and a summary of mutations."#,
+            identity = current_identity,
+            scores = scores_summary,
+            transcripts = transcripts_summary,
+            history = history_summary,
+            reference = reference,
+            regression = regression_note,
+            model = persona_model,
+        ),
+    }
 }
 
 pub async fn optimize_identity(
@@ -15,6 +114,7 @@ pub async fn optimize_identity(
     transcripts: &[(String, String)],
     history: &[HistoryEntry],
     reference: &str,
+    mode: &EvalMode,
     is_regression: bool,
     persona_model: &str,
 ) -> Result<OptimizationResult> {
@@ -63,52 +163,7 @@ pub async fn optimize_identity(
         "required": ["identity", "mutation_summary"]
     });
 
-    let regression_note = if is_regression {
-        "\n\nIMPORTANT: The current iteration scored below the best. You are working from the best-scoring identity. Focus on targeted improvements that avoid the regression seen in recent iterations. The previous optimization added too many rules — consider simplifying instead.\n"
-    } else {
-        ""
-    };
-
-    let prompt = format!(
-        r#"You are an identity prompt optimizer. Your job is to improve an AI agent's system prompt based on evaluation results.
-
-## Current Identity
-{identity}
-
-## Evaluation Scores
-{scores}
-
-## Transcript Summaries
-{transcripts}
-
-## History of Previous Iterations
-{history}
-
-## Reference Material
-{reference}
-{regression}
-Analyze the scores, rationales, and transcript summaries. Identify weaknesses and improve the identity document.
-
-Rules:
-1. Preserve the markdown structure (headings, lists)
-2. Make targeted, specific changes — don't rewrite everything
-3. Focus on the lowest-scoring dimensions
-4. Keep the core role and personality intact
-5. The mutation_summary should be a one-line description of what you changed and what you removed
-6. If a rule was added in a previous iteration and scores did not improve or worsened, REMOVE it. Pruning ineffective rules is as important as adding new ones
-7. Keep the total identity document under 800 words. If adding a rule would exceed this, remove or consolidate a less effective rule first
-8. The persona agent runs on model tier "{model}". Smaller models need simpler, clearer instructions — avoid complex conditional rules, multi-step procedural instructions, or rules with many exceptions. Prefer one clear directive over three nuanced ones
-9. If a case consistently scores below 0.5 across multiple iterations despite identity changes, the failure is likely a model capability limit, not an identity problem. Do not add more rules targeting that case — focus optimization budget on cases where identity changes can actually help
-
-Return the complete updated identity document and a summary of mutations."#,
-        identity = optimization_base,
-        scores = scores_summary,
-        transcripts = transcripts_summary,
-        history = history_summary,
-        reference = reference,
-        regression = regression_note,
-        model = persona_model,
-    );
+    let prompt = build_optimizer_prompt(mode, optimization_base, &scores_summary, &transcripts_summary, &history_summary, reference, is_regression, persona_model);
 
     let response = client
         .build(Tier::Optimizer, &prompt)
@@ -148,5 +203,45 @@ Return the complete updated identity document and a summary of mutations."#,
                 )))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::EvalMode;
+
+    #[test]
+    fn soul_mode_optimizer_prompt_targets_prose() {
+        let prompt = build_optimizer_prompt(
+            &EvalMode::Soul,
+            "# Bot\n## Identity\nI am helpful",
+            "scores summary",
+            "transcripts summary",
+            "history summary",
+            "reference",
+            false,
+            "haiku",
+        );
+        assert!(prompt.contains("prose"));
+        assert!(prompt.contains("SOUL"));
+        assert!(prompt.contains("voice"));
+        assert!(prompt.contains("narrative"));
+    }
+
+    #[test]
+    fn default_mode_optimizer_prompt_unchanged() {
+        let prompt = build_optimizer_prompt(
+            &EvalMode::Claude,
+            "identity",
+            "scores",
+            "transcripts",
+            "history",
+            "reference",
+            false,
+            "sonnet",
+        );
+        assert!(prompt.contains("identity prompt optimizer"));
+        assert!(prompt.contains("Preserve the markdown structure"));
     }
 }

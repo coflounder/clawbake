@@ -36,6 +36,50 @@ pub struct LoopRunner {
     user_stopped: Arc<Mutex<bool>>,
 }
 
+/// Load held-constant context files and concatenate them into a single string
+/// that gets prepended to the system prompt alongside the target document.
+fn load_held_context(held: &crate::types::HeldContext) -> String {
+    let mut context = String::new();
+
+    if let Some(ref path) = held.claude_md {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            context.push_str("---\n# Held Constant: CLAUDE.md\n");
+            context.push_str(&content);
+            context.push_str("\n---\n\n");
+        }
+    }
+
+    if let Some(ref path) = held.agents_md {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            context.push_str("---\n# Held Constant: AGENTS.md\n");
+            context.push_str(&content);
+            context.push_str("\n---\n\n");
+        }
+    }
+
+    if let Some(ref path) = held.memory_md {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            context.push_str("---\n# Held Constant: MEMORY.md\n");
+            context.push_str(&content);
+            context.push_str("\n---\n\n");
+        }
+    }
+
+    for path in &held.skills {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            let label = path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or("skill");
+            context.push_str(&format!("---\n# Held Constant: {}\n", label));
+            context.push_str(&content);
+            context.push_str("\n---\n\n");
+        }
+    }
+
+    context
+}
+
 impl LoopRunner {
     pub fn new(
         client: ClaudeClient,
@@ -75,6 +119,7 @@ impl LoopRunner {
             &self.config.persona,
             &reference,
             self.config.eval.eval_count,
+            &self.config.mode.target,
             None,
         )
         .await
@@ -97,14 +142,25 @@ impl LoopRunner {
             case_count: cases.len(),
         });
 
-        // Generate and bootstrap identity with richer behavioral definitions
-        self.log("Bootstrapping identity with behavioral definitions...");
-        let mut current_identity = identity::bootstrap_identity(&self.client, &self.config.persona, &reference).await?;
+        // Generate initial identity (mode-aware)
+        let mut current_identity = match self.config.mode.target {
+            crate::types::EvalMode::Soul => {
+                self.log("Generating SOUL document from persona spec...");
+                identity::generate_soul(&self.config.persona)
+            }
+            _ => {
+                self.log("Bootstrapping identity with behavioral definitions...");
+                identity::bootstrap_identity(&self.client, &self.config.persona, &reference).await?
+            }
+        };
 
         let mut convergence = ConvergenceChecker::new(self.config.eval.max_iterations);
         let mut best_score: f64 = 0.0;
         let mut best_identity = current_identity.clone();
         let mut hist = history::load_history(&self.state_dir.history_path())?;
+
+        // Load held-constant context
+        let held_context = load_held_context(&self.config.mode.hold_constant);
 
         // Set up sandbox
         let sandbox = SandboxEnvironment::new(&self.config.persona.tools)?;
@@ -145,6 +201,7 @@ impl LoopRunner {
                     &self.config.persona,
                     &reference,
                     self.config.eval.eval_count,
+                    &self.config.mode.target,
                     Some(&current_identity),
                 ).await?;
                 let cases_json = serde_json::to_string_pretty(&cases)?;
@@ -153,30 +210,63 @@ impl LoopRunner {
                 convergence.exempt_from_regression(iteration);
             }
 
-            // Phase 2: Run cases
-            self.log(format!(
-                "Running {} cases (max {} parallel, {} turns)...",
-                cases.len(),
-                self.config.eval.max_parallel,
-                self.config.eval.max_turns_per_case,
-            ));
+            // Build system prompt: identity + held context for runners
+            let system_prompt = if held_context.is_empty() {
+                current_identity.clone()
+            } else {
+                format!("{}\n\n{}", current_identity, held_context)
+            };
 
-            let case_results = runner::run_cases(
-                &self.client,
-                &cases,
-                &current_identity,
-                &sandbox,
-                &allowed_tools,
-                self.config.eval.max_parallel,
-                self.config.eval.max_turns_per_case,
-                &self.event_tx,
-            )
-            .await?;
+            // Phase 2: Run cases (mode-aware)
+            let case_results = match self.config.mode.target {
+                crate::types::EvalMode::Soul => {
+                    let session_count = self.config.mode.soul.session_count;
+                    self.log(format!(
+                        "Running {} cases x {} sessions (max {} parallel, {} turns)...",
+                        cases.len(),
+                        session_count,
+                        self.config.eval.max_parallel,
+                        self.config.eval.max_turns_per_case,
+                    ));
+                    runner::run_cases_multi_session(
+                        &self.client,
+                        &cases,
+                        &system_prompt,
+                        &sandbox,
+                        &allowed_tools,
+                        self.config.eval.max_parallel,
+                        self.config.eval.max_turns_per_case,
+                        session_count,
+                        &self.event_tx,
+                    )
+                    .await?
+                }
+                _ => {
+                    self.log(format!(
+                        "Running {} cases (max {} parallel, {} turns)...",
+                        cases.len(),
+                        self.config.eval.max_parallel,
+                        self.config.eval.max_turns_per_case,
+                    ));
+                    runner::run_cases(
+                        &self.client,
+                        &cases,
+                        &system_prompt,
+                        &sandbox,
+                        &allowed_tools,
+                        self.config.eval.max_parallel,
+                        self.config.eval.max_turns_per_case,
+                        &self.event_tx,
+                    )
+                    .await?
+                }
+            };
 
-            // Phase 3: Evaluate (parallel)
+            // Phase 3: Evaluate
             self.log("Evaluating transcripts...");
             let eval_semaphore = Arc::new(Semaphore::new(self.config.eval.max_parallel));
             let mut eval_tasks = Vec::new();
+            let eval_mode = self.config.mode.target;
 
             for (case, result) in cases.iter().zip(case_results.iter()) {
                 // Build invocation before spawn (borrows &self.client)
@@ -185,6 +275,7 @@ impl LoopRunner {
                     case,
                     result,
                     &current_identity,
+                    &eval_mode,
                 );
 
                 let sem = eval_semaphore.clone();
@@ -196,7 +287,7 @@ impl LoopRunner {
                     let _permit = sem.acquire().await.unwrap();
 
                     let response = invocation.execute().await?;
-                    let (score, summary) = evaluator::parse_eval_response(&response, &case_id)?;
+                    let (score, summary) = evaluator::parse_eval_response(&response, &case_id, &eval_mode)?;
 
                     let _ = tx.send(EvalEvent::CaseComplete {
                         case_id: case_id.clone(),
@@ -256,14 +347,15 @@ impl LoopRunner {
 
             convergence.record_score(avg_score);
 
-            // Update best
+            // Update best (mode-aware path)
             if avg_score > best_score {
                 best_score = avg_score;
                 best_identity = current_identity.clone();
-                identity::write_identity(
-                    &self.state_dir.best_identity_path(),
-                    &current_identity,
-                )?;
+                let best_path = match self.config.mode.target {
+                    crate::types::EvalMode::Soul => self.state_dir.best_soul_path(),
+                    _ => self.state_dir.best_identity_path(),
+                };
+                identity::write_identity(&best_path, &current_identity)?;
             }
 
             // Send budget update
@@ -282,11 +374,12 @@ impl LoopRunner {
                 let budget = budget_arc.lock().await;
                 let user_stopped = *self.user_stopped.lock().await;
                 if let Some(reason) = convergence.check(iteration, &budget, user_stopped) {
-                    // Save final identity for this iteration
-                    identity::write_identity(
-                        &self.state_dir.iteration_identity_path(iteration),
-                        &current_identity,
-                    )?;
+                    // Save final identity for this iteration (mode-aware path)
+                    let iter_path = match self.config.mode.target {
+                        crate::types::EvalMode::Soul => self.state_dir.iteration_soul_path(iteration),
+                        _ => self.state_dir.iteration_identity_path(iteration),
+                    };
+                    identity::write_identity(&iter_path, &current_identity)?;
 
                     let _ = self.event_tx.send(EvalEvent::LoopComplete {
                         reason: reason.to_string(),
@@ -313,6 +406,7 @@ impl LoopRunner {
                 &transcripts,
                 &hist,
                 &reference,
+                &self.config.mode.target,
                 avg_score < best_score,
                 &self.config.models.persona,
             )
@@ -320,11 +414,12 @@ impl LoopRunner {
 
             current_identity = opt_result.new_identity.clone();
 
-            // Save iteration identity
-            identity::write_identity(
-                &self.state_dir.iteration_identity_path(iteration),
-                &current_identity,
-            )?;
+            // Save iteration identity (mode-aware path)
+            let iter_path = match self.config.mode.target {
+                crate::types::EvalMode::Soul => self.state_dir.iteration_soul_path(iteration),
+                _ => self.state_dir.iteration_identity_path(iteration),
+            };
+            identity::write_identity(&iter_path, &current_identity)?;
 
             self.log(format!("Mutation: {}", opt_result.mutation_summary));
             let _ = self.event_tx.send(EvalEvent::OptimizationComplete {

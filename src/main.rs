@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Init => cmd_init(&state_dir).await?,
-        Commands::Run { no_wizard, headless } => cmd_run(&state_dir, no_wizard, headless).await?,
+        Commands::Run { no_wizard, mode, hold, headless } => cmd_run(&state_dir, no_wizard, mode, hold, headless).await?,
         Commands::Status => cmd_status(&state_dir)?,
         Commands::Export { output } => cmd_export(&state_dir, output)?,
     }
@@ -54,7 +54,33 @@ async fn cmd_init(state_dir: &StateDir) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_run(state_dir: &StateDir, no_wizard: bool, headless: bool) -> anyhow::Result<()> {
+fn apply_mode_overrides(config: &mut AppConfig, mode: &Option<String>, hold: &[PathBuf]) -> anyhow::Result<()> {
+    if let Some(mode_str) = mode {
+        let eval_mode: crate::types::EvalMode = mode_str
+            .parse()
+            .map_err(|e: String| anyhow::anyhow!(e))?;
+        config.mode.target = eval_mode;
+    }
+
+    for path in hold {
+        let filename = path.file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("")
+            .to_uppercase();
+        match filename.as_str() {
+            "CLAUDE.MD" => config.mode.hold_constant.claude_md = Some(path.clone()),
+            "AGENTS.MD" => config.mode.hold_constant.agents_md = Some(path.clone()),
+            "MEMORY.MD" => config.mode.hold_constant.memory_md = Some(path.clone()),
+            _ => {
+                // Treat unrecognized files as skill/plugin hold-constant entries
+                config.mode.hold_constant.skills.push(path.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_run(state_dir: &StateDir, no_wizard: bool, mode: Option<String>, hold: Vec<PathBuf>, headless: bool) -> anyhow::Result<()> {
     if no_wizard {
         // No wizard — load config from file and run eval directly
         if !state_dir.config_path().exists() {
@@ -63,7 +89,8 @@ async fn cmd_run(state_dir: &StateDir, no_wizard: bool, headless: bool) -> anyho
                 state_dir.config_path().display()
             );
         }
-        let config = AppConfig::load(&state_dir.config_path())?;
+        let mut config = AppConfig::load(&state_dir.config_path())?;
+        apply_mode_overrides(&mut config, &mode, &hold)?;
         state_dir.init()?;
         state_dir.clean_run_data()?;
         if headless {
@@ -105,6 +132,11 @@ async fn cmd_run(state_dir: &StateDir, no_wizard: bool, headless: bool) -> anyho
         if !reference.is_empty() {
             // Reference is handled separately via state_dir
         }
+
+        let mut config = config;
+        // Apply CLI mode overrides in wizard path too
+        apply_mode_overrides(&mut config, &mode, &hold)
+            .map_err(|e| crate::error::ClawbakeError::Eval(e.to_string()))?;
 
         let budget = Arc::new(Mutex::new(TokenBudget::new(config.eval.max_budget_tokens)));
         let client = claude::client::ClaudeClient::new(config.clone(), budget);

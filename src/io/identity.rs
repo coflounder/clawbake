@@ -42,6 +42,37 @@ pub fn generate_identity(spec: &PersonaSpec) -> String {
     doc
 }
 
+/// Generate a SOUL.md document — identity and values only, no tools or task instructions.
+pub fn generate_soul(spec: &PersonaSpec) -> String {
+    let mut doc = String::new();
+
+    doc.push_str(&format!("# {}\n\n", spec.name));
+
+    doc.push_str("## Identity\n\n");
+    doc.push_str(&format!("{}\n\n", spec.role));
+
+    doc.push_str("## Purpose\n\n");
+    doc.push_str(&format!("{}\n\n", spec.responsibility));
+
+    if !spec.personality_traits.is_empty() {
+        doc.push_str("## Voice & Personality\n\n");
+        for trait_ in &spec.personality_traits {
+            doc.push_str(&format!("- {}\n", trait_));
+        }
+        doc.push('\n');
+    }
+
+    if !spec.guardrails.is_empty() {
+        doc.push_str("## Principles\n\n");
+        for rule in &spec.guardrails {
+            doc.push_str(&format!("- {}\n", rule));
+        }
+        doc.push('\n');
+    }
+
+    doc
+}
+
 pub async fn bootstrap_identity(
     client: &ClaudeClient,
     spec: &PersonaSpec,
@@ -104,4 +135,59 @@ pub fn write_identity(path: &Path, content: &str) -> Result<()> {
 
 pub fn read_identity(path: &Path) -> Result<String> {
     Ok(std::fs::read_to_string(path)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn read_soul_md() {
+        let dir = TempDir::new().unwrap();
+        let soul_path = dir.path().join("SOUL.md");
+        std::fs::write(&soul_path, "# My Agent\n\nI am helpful.").unwrap();
+        let content = read_identity(&soul_path).unwrap();
+        assert!(content.contains("I am helpful"));
+    }
+
+    #[test]
+    fn generate_soul_document_from_spec() {
+        let spec = PersonaSpec {
+            name: "TestBot".to_string(),
+            role: "assistant".to_string(),
+            responsibility: "helping users".to_string(),
+            personality_traits: vec![
+                crate::types::PersonalityTrait::Friendly,
+                crate::types::PersonalityTrait::Thorough,
+            ],
+            tools: vec![],
+            guardrails: vec!["Never lie".to_string()],
+        };
+        let soul = generate_soul(&spec);
+        assert!(soul.contains("# TestBot"));
+        assert!(soul.contains("Friendly"));
+        assert!(soul.contains("Thorough"));
+        assert!(!soul.contains("## Tools"));
+        assert!(soul.contains("Never lie"));
+    }
+
+    #[test]
+    fn generate_identity_unchanged() {
+        let spec = PersonaSpec {
+            name: "Old".to_string(),
+            role: "r".to_string(),
+            responsibility: "resp".to_string(),
+            personality_traits: vec![],
+            tools: vec![crate::types::ToolSpec {
+                name: "Bash".to_string(),
+                description: "run commands".to_string(),
+                stub_behavior: None,
+            }],
+            guardrails: vec![],
+        };
+        let doc = generate_identity(&spec);
+        assert!(doc.contains("## Tools"));
+        assert!(doc.contains("### Bash"));
+    }
 }

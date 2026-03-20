@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Init => cmd_init(&state_dir).await?,
-        Commands::Run { no_wizard } => cmd_run(&state_dir, no_wizard).await?,
+        Commands::Run { no_wizard, mode, hold } => cmd_run(&state_dir, no_wizard, mode, hold).await?,
         Commands::Status => cmd_status(&state_dir)?,
         Commands::Export { output } => cmd_export(&state_dir, output)?,
     }
@@ -54,7 +54,32 @@ async fn cmd_init(state_dir: &StateDir) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_run(state_dir: &StateDir, no_wizard: bool) -> anyhow::Result<()> {
+fn apply_mode_overrides(config: &mut AppConfig, mode: &Option<String>, hold: &[PathBuf]) -> anyhow::Result<()> {
+    if let Some(mode_str) = mode {
+        let eval_mode: crate::types::EvalMode = mode_str
+            .parse()
+            .map_err(|e: String| anyhow::anyhow!(e))?;
+        config.mode.target = eval_mode;
+    }
+
+    for path in hold {
+        let filename = path.file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("")
+            .to_uppercase();
+        match filename.as_str() {
+            "CLAUDE.MD" => config.mode.hold_constant.claude_md = Some(path.clone()),
+            "AGENTS.MD" => config.mode.hold_constant.agents_md = Some(path.clone()),
+            "MEMORY.MD" => config.mode.hold_constant.memory_md = Some(path.clone()),
+            _ => {
+                eprintln!("Warning: unrecognized hold file '{}', ignoring", path.display());
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_run(state_dir: &StateDir, no_wizard: bool, mode: Option<String>, hold: Vec<PathBuf>) -> anyhow::Result<()> {
     if no_wizard {
         // No wizard — load config from file and run eval directly
         if !state_dir.config_path().exists() {
@@ -63,7 +88,8 @@ async fn cmd_run(state_dir: &StateDir, no_wizard: bool) -> anyhow::Result<()> {
                 state_dir.config_path().display()
             );
         }
-        let config = AppConfig::load(&state_dir.config_path())?;
+        let mut config = AppConfig::load(&state_dir.config_path())?;
+        apply_mode_overrides(&mut config, &mode, &hold)?;
         return run_eval_with_dashboard(state_dir, config).await;
     }
 
@@ -99,6 +125,26 @@ async fn cmd_run(state_dir: &StateDir, no_wizard: bool) -> anyhow::Result<()> {
             .join("\n");
         if !reference.is_empty() {
             // Reference is handled separately via state_dir
+        }
+
+        let mut config = config;
+        // Apply CLI mode overrides in wizard path too
+        if let Some(mode_str) = &mode {
+            if let Ok(eval_mode) = mode_str.parse::<crate::types::EvalMode>() {
+                config.mode.target = eval_mode;
+            }
+        }
+        for path in &hold {
+            let filename = path.file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or("")
+                .to_uppercase();
+            match filename.as_str() {
+                "CLAUDE.MD" => config.mode.hold_constant.claude_md = Some(path.clone()),
+                "AGENTS.MD" => config.mode.hold_constant.agents_md = Some(path.clone()),
+                "MEMORY.MD" => config.mode.hold_constant.memory_md = Some(path.clone()),
+                _ => {}
+            }
         }
 
         let budget = Arc::new(Mutex::new(TokenBudget::new(config.eval.max_budget_tokens)));

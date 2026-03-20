@@ -60,6 +60,14 @@ impl StateDir {
         self.best_dir().join("identity.md")
     }
 
+    pub fn best_soul_path(&self) -> PathBuf {
+        self.best_dir().join("SOUL.md")
+    }
+
+    pub fn iteration_soul_path(&self, iteration: usize) -> PathBuf {
+        self.iteration_dir(iteration).join("SOUL.md")
+    }
+
     pub fn history_path(&self) -> PathBuf {
         self.root.join("history.json")
     }

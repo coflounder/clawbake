@@ -1,16 +1,6 @@
 name: Eval Matrix (All Modes)
 
 on:
-  push:
-    branches: [ main, develop ]
-    paths:
-      - 'src/**'
-      - '.clawbake/**'
-      - '.github/workflows/eval-matrix.yml'
-      - 'Cargo.toml'
-  schedule:
-    # Run daily at 2 AM UTC
-    - cron: '0 2 * * *'
   workflow_dispatch:
 
 jobs:

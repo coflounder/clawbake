@@ -225,6 +225,12 @@ impl ScoringWeights {
                 task_quality: 0.25,
                 efficiency: 0.15,
             },
+            EvalMode::Claude | EvalMode::Agents => Self {
+                persona_fidelity: 0.15,
+                task_quality: 0.50,
+                efficiency: 0.20,
+                // convention_adherence makes up the remaining 0.15 via EvalScore::convention_adherence
+            },
             _ => Self::default(),
         }
     }
@@ -243,6 +249,13 @@ pub enum EvalCategory {
     VoicePreservation,
     BoundaryHolding,
     NovelSituation,
+    // Claude/project-instruction mode categories
+    ConventionAdherence,
+    ForbiddenActionAvoidance,
+    ToolPreference,
+    WorkflowCompliance,
+    InstructionConflict,
+    InstructionCoverage,
 }
 
 impl std::fmt::Display for EvalCategory {
@@ -258,6 +271,12 @@ impl std::fmt::Display for EvalCategory {
             Self::VoicePreservation => write!(f, "Voice Preservation"),
             Self::BoundaryHolding => write!(f, "Boundary Holding"),
             Self::NovelSituation => write!(f, "Novel Situation"),
+            Self::ConventionAdherence => write!(f, "Convention Adherence"),
+            Self::ForbiddenActionAvoidance => write!(f, "Forbidden Action Avoidance"),
+            Self::ToolPreference => write!(f, "Tool Preference"),
+            Self::WorkflowCompliance => write!(f, "Workflow Compliance"),
+            Self::InstructionConflict => write!(f, "Instruction Conflict"),
+            Self::InstructionCoverage => write!(f, "Instruction Coverage"),
         }
     }
 }
@@ -270,6 +289,17 @@ impl EvalCategory {
             Self::VoicePreservation,
             Self::BoundaryHolding,
             Self::NovelSituation,
+        ]
+    }
+
+    pub fn for_claude_mode() -> Vec<Self> {
+        vec![
+            Self::ConventionAdherence,
+            Self::ForbiddenActionAvoidance,
+            Self::ToolPreference,
+            Self::WorkflowCompliance,
+            Self::InstructionConflict,
+            Self::InstructionCoverage,
         ]
     }
 }
@@ -290,6 +320,9 @@ pub struct EvalScore {
     pub persona_fidelity: f64,
     pub task_quality: f64,
     pub efficiency: f64,
+    /// Convention adherence score — only meaningful in claude mode (0.0 if unused)
+    #[serde(default)]
+    pub convention_adherence: f64,
     pub overall: f64,
     pub rationale: String,
 }
@@ -299,9 +332,50 @@ impl EvalScore {
         fidelity * weights.persona_fidelity + quality * weights.task_quality + efficiency * weights.efficiency
     }
 
+    /// Claude mode overall: fidelity*0.15 + quality*0.50 + efficiency*0.20 + convention*0.15
+    pub fn compute_overall_claude(fidelity: f64, quality: f64, efficiency: f64, convention: f64) -> f64 {
+        let result = fidelity * 0.15 + quality * 0.50 + efficiency * 0.20 + convention * 0.15;
+        (result * 10000.0).round() / 10000.0
+    }
+
     pub fn compute_overall(fidelity: f64, quality: f64, efficiency: f64) -> f64 {
         let result = fidelity * 0.4 + quality * 0.4 + efficiency * 0.2;
         (result * 1000.0).round() / 1000.0
+    }
+}
+
+/// Result of ablating one instruction from a project instruction file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AblationResult {
+    pub removed_instruction: String,
+    pub baseline_score: f64,
+    pub ablated_score: f64,
+    /// delta = ablated - baseline. Negative = instruction was helping.
+    pub delta: f64,
+    pub recommendation: AblationAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AblationAction {
+    /// Score dropped significantly — instruction is load-bearing, keep it.
+    Keep,
+    /// No measurable impact — candidate for removal (saves context window).
+    Remove,
+    /// Score dropped slightly — instruction exists but is weakly worded, strengthen it.
+    Strengthen,
+    /// Score improved after removal — instruction was net-negative, rewrite or delete.
+    Rewrite,
+}
+
+impl std::fmt::Display for AblationAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Keep => write!(f, "Keep"),
+            Self::Remove => write!(f, "Remove"),
+            Self::Strengthen => write!(f, "Strengthen"),
+            Self::Rewrite => write!(f, "Rewrite"),
+        }
     }
 }
 

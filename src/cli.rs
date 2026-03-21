@@ -38,6 +38,11 @@ pub enum Commands {
         #[arg(long)]
         hold: Vec<PathBuf>,
 
+        /// Path to the project codebase for claude/agents mode evaluation.
+        /// Clawbake will detect CLAUDE.md or AGENTS.md inside this directory.
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+
         /// Run without the TUI dashboard (log to stdout)
         #[arg(long)]
         headless: bool,
@@ -89,9 +94,22 @@ mod tests {
     fn parse_run_defaults_no_mode() {
         let cli = Cli::parse_from(["clawbake", "run"]);
         match cli.command {
-            Commands::Run { mode, hold, .. } => {
+            Commands::Run { mode, hold, project_dir, .. } => {
                 assert!(mode.is_none());
                 assert!(hold.is_empty());
+                assert!(project_dir.is_none());
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn parse_run_with_project_dir() {
+        let cli = Cli::parse_from(["clawbake", "run", "--mode", "claude", "--project-dir", "/tmp/myrepo"]);
+        match cli.command {
+            Commands::Run { mode, project_dir, .. } => {
+                assert_eq!(mode.unwrap(), "claude");
+                assert_eq!(project_dir.unwrap(), PathBuf::from("/tmp/myrepo"));
             }
             _ => panic!("Expected Run command"),
         }

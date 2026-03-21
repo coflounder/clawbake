@@ -1,7 +1,7 @@
 use crate::error::Result;
 use crate::types::{EvalConfig, EvalMode, HeldContext, ModelConfig, OutputConfig, PersonaSpec};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SoulModeConfig {
@@ -19,12 +19,43 @@ impl Default for SoulModeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeModeConfig {
+    /// Path to the codebase the project instruction file will be evaluated against.
+    /// The sandbox will be seeded from this directory.
+    pub project_dir: Option<PathBuf>,
+    /// Enable ablation testing (remove one instruction at a time, measure impact).
+    #[serde(default = "default_true")]
+    pub ablation: bool,
+    /// Identify decision points where the instruction file provided no guidance.
+    #[serde(default = "default_true")]
+    pub coverage_analysis: bool,
+    /// Built-in scaffold to use when project_dir is not provided.
+    /// Options: "rust-minimal", "typescript-next", "python-fastapi", "monorepo"
+    pub scaffold_codebase: Option<String>,
+}
+
+fn default_true() -> bool { true }
+
+impl Default for ClaudeModeConfig {
+    fn default() -> Self {
+        Self {
+            project_dir: None,
+            ablation: true,
+            coverage_analysis: true,
+            scaffold_codebase: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModeConfig {
     pub target: EvalMode,
     #[serde(default)]
     pub hold_constant: HeldContext,
     #[serde(default)]
     pub soul: SoulModeConfig,
+    #[serde(default)]
+    pub claude: ClaudeModeConfig,
 }
 
 impl Default for ModeConfig {
@@ -33,6 +64,7 @@ impl Default for ModeConfig {
             target: EvalMode::default(),
             hold_constant: HeldContext::default(),
             soul: SoulModeConfig::default(),
+            claude: ClaudeModeConfig::default(),
         }
     }
 }

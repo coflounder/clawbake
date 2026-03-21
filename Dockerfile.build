@@ -1,0 +1,5 @@
+FROM rust:latest
+WORKDIR /workspace
+COPY . .
+RUN cargo build --release
+ENTRYPOINT ["/workspace/target/release/clawbake"]

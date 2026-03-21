@@ -17,6 +17,13 @@ pub enum Commands {
     /// Initialize a new clawbake project with the setup wizard
     Init,
 
+    /// Initialize non-interactively from a TOML config file
+    InitConfig {
+        /// Path to config.toml file
+        #[arg(value_name = "CONFIG")]
+        config: PathBuf,
+    },
+
     /// Run the eval loop to generate and optimize the identity
     Run {
         /// Skip the wizard and use existing config

@@ -1,0 +1,128 @@
+name: Mode Eval
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Eval mode'
+        required: true
+        default: 'soul'
+        type: choice
+        options:
+          - soul
+          - claude
+          - agents
+          - memory
+          - skills
+      iterations:
+        description: 'Max iterations'
+        required: false
+        default: '3'
+        type: string
+
+jobs:
+  mode-eval:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build clawbake
+        run: |
+          cargo build --release
+          echo "CLAWBAKE_BIN=$(pwd)/target/release/clawbake" >> $GITHUB_ENV
+
+      - name: Authenticate with Claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Validate config
+        run: |
+          if [ ! -f ".clawbake/config.toml" ]; then
+            echo "❌ No .clawbake/config.toml found. Run 'clawbake init' first."
+            exit 1
+          fi
+          echo "EVAL_MODE=${{ inputs.mode }}" >> $GITHUB_ENV
+          echo "MAX_ITERATIONS=${{ inputs.iterations }}" >> $GITHUB_ENV
+
+      - name: Run eval
+        run: |
+          echo "🧠 Running ${{ env.EVAL_MODE }} eval (max ${{ env.MAX_ITERATIONS }} iterations)"
+
+          ${{ env.CLAWBAKE_BIN }} run \
+            --mode "${{ env.EVAL_MODE }}" \
+            --headless \
+            --no-wizard 2>&1 | tee eval-output.log
+
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "EVAL_EXIT_CODE=$EXIT_CODE" >> $GITHUB_ENV
+
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ Eval failed with code $EXIT_CODE"
+            exit $EXIT_CODE
+          fi
+
+      - name: Export results
+        if: always()
+        run: |
+          ${{ env.CLAWBAKE_BIN }} export -o ./eval-output || true
+
+          if [ -f ".clawbake/best/scores.json" ]; then
+            cp .clawbake/best/scores.json eval-output/scores.json
+          fi
+
+          if [ -f ".clawbake/best/SOUL.md" ]; then
+            {
+              echo "## ✨ ${{ env.EVAL_MODE }} Eval Complete"
+              echo ""
+              echo "### Best Identity"
+              echo '```markdown'
+              head -50 .clawbake/best/SOUL.md
+              echo '```'
+              if [ -f ".clawbake/best/scores.json" ]; then
+                echo ""
+                echo "### Scores"
+                echo '```json'
+                cat .clawbake/best/scores.json
+                echo '```'
+              fi
+            } > eval-summary.md
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-${{ inputs.mode }}-results
+          path: |
+            eval-output/
+            eval-output.log
+            eval-summary.md
+          retention-days: 30
+
+      - name: Write step summary
+        if: always()
+        run: |
+          {
+            echo "## ${{ env.EVAL_MODE }} Eval"
+            echo "**Mode:** ${{ env.EVAL_MODE }}"
+            echo "**Max iterations:** ${{ env.MAX_ITERATIONS }}"
+            BEST_SCORE=$(grep "Best score:" eval-output.log 2>/dev/null | tail -1 | awk '{print $NF}')
+            [ -n "$BEST_SCORE" ] && echo "**Best score:** $BEST_SCORE"
+            echo ""
+            echo "### Last 50 lines"
+            echo '```'
+            tail -50 eval-output.log 2>/dev/null || echo "No log"
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY

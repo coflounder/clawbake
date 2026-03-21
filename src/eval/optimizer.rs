@@ -25,6 +25,45 @@ pub fn build_optimizer_prompt(
     };
 
     match mode {
+        EvalMode::Claude | EvalMode::Agents => format!(
+            r#"You are a project instruction optimizer. Your job is to improve a CLAUDE.md or AGENTS.md file based on how well an agent followed its instructions during evaluation.
+
+## Current Project Instruction File
+{identity}
+
+## Evaluation Scores
+{scores}
+
+## Transcript Summaries
+{transcripts}
+
+## History of Previous Iterations
+{history}
+
+## Project Reference
+{reference}
+{regression}
+Analyze the scores, rationales, and summaries. The key metric is convention_adherence — did the agent follow the stated instructions?
+
+Rules:
+1. **Mutations are structural**: Add instructions, remove instructions, reorder them, clarify ambiguous ones. This is NOT a prose document — it's a specification. Use clear directives.
+2. **Ablation principle**: If a rule exists but convention_adherence scores don't improve when it's tested, the rule is weakly worded. Rewrite it to be unambiguous.
+3. **Coverage gaps**: If instruction_coverage cases show the agent guessing, add explicit instructions for those situations.
+4. **Conflict resolution**: If instruction_conflict scores are low, reorder rules so higher-priority rules appear first, and add explicit "when X conflicts with Y, prefer X" statements.
+5. **Remove ineffective rules**: If a rule was added in a previous iteration and scores didn't improve, REMOVE it. Context window is precious.
+6. **Length limit**: Keep the instruction file under 600 words. Every instruction must earn its place.
+7. **Clarity over completeness**: One clear directive beats three hedged ones. The persona agent runs on "{model}" — prefer simple, unambiguous instructions.
+8. The mutation_summary should be a one-line description of what changed and why.
+
+Return the complete updated instruction file and a summary of mutations."#,
+            identity = current_identity,
+            scores = scores_summary,
+            transcripts = transcripts_summary,
+            history = history_summary,
+            reference = reference,
+            regression = regression_note,
+            model = persona_model,
+        ),
         EvalMode::Soul => format!(
             r#"You are a SOUL.md optimizer. Your job is to refine an AI agent's deep identity document — its values, voice, worldview, and behavioral principles.
 
@@ -121,10 +160,17 @@ pub async fn optimize_identity(
     let scores_summary = scores
         .iter()
         .map(|s| {
-            format!(
-                "- {}: fidelity={:.2} quality={:.2} efficiency={:.2} overall={:.2} | {}",
-                s.case_id, s.persona_fidelity, s.task_quality, s.efficiency, s.overall, s.rationale
-            )
+            if s.convention_adherence > 0.0 {
+                format!(
+                    "- {}: fidelity={:.2} quality={:.2} efficiency={:.2} convention={:.2} overall={:.2} | {}",
+                    s.case_id, s.persona_fidelity, s.task_quality, s.efficiency, s.convention_adherence, s.overall, s.rationale
+                )
+            } else {
+                format!(
+                    "- {}: fidelity={:.2} quality={:.2} efficiency={:.2} overall={:.2} | {}",
+                    s.case_id, s.persona_fidelity, s.task_quality, s.efficiency, s.overall, s.rationale
+                )
+            }
         })
         .collect::<Vec<_>>()
         .join("\n");

@@ -57,8 +57,8 @@ Each mode would have:
 | # | Mode | Doc | Priority |
 |---|------|-----|----------|
 | 1 | SOUL.md | [01-soul-mode.md](./01-soul-mode.md) | High |
-| 2 | CLAUDE.md | [02-claude-mode.md](./02-claude-mode.md) | High |
-| 3 | AGENTS.md | [03-agents-mode.md](./03-agents-mode.md) | Medium |
+| 2 | CLAUDE.md / AGENTS.md | [02-claude-mode.md](./02-claude-mode.md) | High |
+| 3 | ~~AGENTS.md~~ | Merged into #2 — CLAUDE.md and AGENTS.md are interchangeable project instruction files | — |
 | 4 | MEMORY.md | [04-memory-mode.md](./04-memory-mode.md) | Critical |
 | 5 | Skills/Plugins | [05-skills-mode.md](./05-skills-mode.md) | High |
 

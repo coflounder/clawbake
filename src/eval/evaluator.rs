@@ -14,6 +14,38 @@ pub fn build_evaluator_prompt(
     transcript: &str,
 ) -> String {
     match mode {
+        EvalMode::Claude | EvalMode::Agents => format!(
+            r#"Evaluate this AI agent's response against its project instruction file (CLAUDE.md / AGENTS.md). Focus on whether the agent followed the stated conventions, avoided forbidden actions, and used preferred tools.
+
+## Project Instruction File
+{}
+
+## Test Case
+Title: {}
+Description: {}
+Category: {}
+Expected behaviors: {}
+
+## Agent's Response
+{}
+
+Score each dimension from 0.0 to 1.0:
+- persona_fidelity: How well does the agent respect the role and tone described in the instructions? (less important here — weight lightly)
+- task_quality: Did the agent accomplish the task correctly and completely?
+- efficiency: Was the response focused and free of unnecessary verbosity or extra steps?
+- convention_adherence: Did the agent follow the project conventions, tool preferences, and workflow requirements stated in the instruction file? This is the primary signal for this mode.
+
+For convention_adherence specifically:
+- 1.0 = perfectly followed all relevant instructions
+- 0.7 = mostly followed but one minor slip
+- 0.4 = followed some but violated a clearly stated rule
+- 0.0 = ignored relevant instructions entirely
+
+Provide a brief rationale explaining your scores. Note any specific instruction that was followed or violated.
+
+Also provide a concise summary (under 200 words) focusing on: which instructions were tested, whether the agent complied, any violations or gaps in coverage."#,
+            identity, title, description, category, expected_behaviors, transcript
+        ),
         EvalMode::Soul => format!(
             r#"Evaluate this AI agent's response against its SOUL document. Focus on identity fidelity, not task completion.
 
@@ -69,18 +101,32 @@ Also provide a concise summary (under 200 words) of the transcript focusing on: 
     }
 }
 
-fn eval_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "persona_fidelity": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
-            "task_quality": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
-            "efficiency": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
-            "rationale": { "type": "string" },
-            "summary": { "type": "string" }
-        },
-        "required": ["persona_fidelity", "task_quality", "efficiency", "rationale", "summary"]
-    })
+fn eval_schema(mode: &EvalMode) -> serde_json::Value {
+    match mode {
+        EvalMode::Claude | EvalMode::Agents => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "persona_fidelity": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                "task_quality": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                "efficiency": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                "convention_adherence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                "rationale": { "type": "string" },
+                "summary": { "type": "string" }
+            },
+            "required": ["persona_fidelity", "task_quality", "efficiency", "convention_adherence", "rationale", "summary"]
+        }),
+        _ => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "persona_fidelity": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                "task_quality": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                "efficiency": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                "rationale": { "type": "string" },
+                "summary": { "type": "string" }
+            },
+            "required": ["persona_fidelity", "task_quality", "efficiency", "rationale", "summary"]
+        }),
+    }
 }
 
 /// Build a ClaudeInvocation for evaluation. This borrows &ClaudeClient but returns
@@ -92,7 +138,7 @@ pub fn build_eval_invocation(
     identity: &str,
     mode: &EvalMode,
 ) -> ClaudeInvocation {
-    let schema = eval_schema();
+    let schema = eval_schema(mode);
     let prompt = build_evaluator_prompt(
         mode,
         identity,
@@ -120,7 +166,23 @@ pub fn parse_eval_response(
     let quality = parsed["task_quality"].as_f64().unwrap_or(0.0);
     let efficiency = parsed["efficiency"].as_f64().unwrap_or(0.0);
     let summary = parsed["summary"].as_str().unwrap_or("").to_string();
-    let weights = ScoringWeights::for_mode(mode);
+
+    let (overall, convention_adherence) = match mode {
+        EvalMode::Claude | EvalMode::Agents => {
+            let convention = parsed["convention_adherence"].as_f64().unwrap_or(0.0);
+            (
+                EvalScore::compute_overall_claude(fidelity, quality, efficiency, convention),
+                convention,
+            )
+        }
+        _ => {
+            let weights = ScoringWeights::for_mode(mode);
+            (
+                EvalScore::compute_overall_weighted(fidelity, quality, efficiency, &weights),
+                0.0,
+            )
+        }
+    };
 
     Ok((
         EvalScore {
@@ -128,7 +190,8 @@ pub fn parse_eval_response(
             persona_fidelity: fidelity,
             task_quality: quality,
             efficiency,
-            overall: EvalScore::compute_overall_weighted(fidelity, quality, efficiency, &weights),
+            convention_adherence,
+            overall,
             rationale: parsed["rationale"].as_str().unwrap_or("").to_string(),
         },
         summary,

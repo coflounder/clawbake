@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Init => cmd_init(&state_dir).await?,
         Commands::InitConfig { config } => cmd_init_config(&state_dir, config).await?,
-        Commands::Run { no_wizard, mode, hold, headless } => cmd_run(&state_dir, no_wizard, mode, hold, headless).await?,
+        Commands::Run { no_wizard, mode, hold, project_dir, headless } => cmd_run(&state_dir, no_wizard, mode, hold, project_dir, headless).await?,
         Commands::Status => cmd_status(&state_dir)?,
         Commands::Export { output } => cmd_export(&state_dir, output)?,
     }
@@ -77,12 +77,21 @@ async fn cmd_init_config(state_dir: &StateDir, config_path: PathBuf) -> anyhow::
     Ok(())
 }
 
-fn apply_mode_overrides(config: &mut AppConfig, mode: &Option<String>, hold: &[PathBuf]) -> anyhow::Result<()> {
+fn apply_mode_overrides(
+    config: &mut AppConfig,
+    mode: &Option<String>,
+    hold: &[PathBuf],
+    project_dir: &Option<PathBuf>,
+) -> anyhow::Result<()> {
     if let Some(mode_str) = mode {
         let eval_mode: crate::types::EvalMode = mode_str
             .parse()
             .map_err(|e: String| anyhow::anyhow!(e))?;
         config.mode.target = eval_mode;
+    }
+
+    if let Some(dir) = project_dir {
+        config.mode.claude.project_dir = Some(dir.clone());
     }
 
     for path in hold {
@@ -103,7 +112,7 @@ fn apply_mode_overrides(config: &mut AppConfig, mode: &Option<String>, hold: &[P
     Ok(())
 }
 
-async fn cmd_run(state_dir: &StateDir, no_wizard: bool, mode: Option<String>, hold: Vec<PathBuf>, headless: bool) -> anyhow::Result<()> {
+async fn cmd_run(state_dir: &StateDir, no_wizard: bool, mode: Option<String>, hold: Vec<PathBuf>, project_dir: Option<PathBuf>, headless: bool) -> anyhow::Result<()> {
     if no_wizard {
         // No wizard — load config from file and run eval directly
         if !state_dir.config_path().exists() {
@@ -113,7 +122,7 @@ async fn cmd_run(state_dir: &StateDir, no_wizard: bool, mode: Option<String>, ho
             );
         }
         let mut config = AppConfig::load(&state_dir.config_path())?;
-        apply_mode_overrides(&mut config, &mode, &hold)?;
+        apply_mode_overrides(&mut config, &mode, &hold, &project_dir)?;
         state_dir.init()?;
         state_dir.clean_run_data()?;
         if headless {
@@ -158,7 +167,7 @@ async fn cmd_run(state_dir: &StateDir, no_wizard: bool, mode: Option<String>, ho
 
         let mut config = config;
         // Apply CLI mode overrides in wizard path too
-        apply_mode_overrides(&mut config, &mode, &hold)
+        apply_mode_overrides(&mut config, &mode, &hold, &project_dir)
             .map_err(|e| crate::error::ClawbakeError::Eval(e.to_string()))?;
 
         let budget = Arc::new(Mutex::new(TokenBudget::new(config.eval.max_budget_tokens)));

@@ -1,6 +1,7 @@
 use crate::claude::client::ClaudeClient;
 use crate::config::AppConfig;
 use crate::error::Result;
+use crate::eval::ablation;
 use crate::eval::convergence::{ConvergenceChecker, StopReason};
 use crate::eval::evaluator;
 use crate::eval::optimizer;
@@ -8,7 +9,7 @@ use crate::eval::planner;
 use crate::eval::runner;
 use crate::io::{history, identity, state::StateDir};
 use crate::sandbox::environment::SandboxEnvironment;
-use crate::types::HistoryEntry;
+use crate::types::{EvalMode, HistoryEntry};
 use chrono::Utc;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, Semaphore};
@@ -144,9 +145,25 @@ impl LoopRunner {
 
         // Generate initial identity (mode-aware)
         let mut current_identity = match self.config.mode.target {
-            crate::types::EvalMode::Soul => {
+            EvalMode::Soul => {
                 self.log("Generating SOUL document from persona spec...");
                 identity::generate_soul(&self.config.persona)
+            }
+            EvalMode::Claude | EvalMode::Agents => {
+                // Try to detect existing project instruction file from project_dir
+                let project_dir = self.config.mode.claude.project_dir.as_deref();
+                if let Some(dir) = project_dir {
+                    if let Some((content, filename)) = identity::detect_project_instruction_file(dir) {
+                        self.log(format!("Detected project instruction file: {}", filename));
+                        content
+                    } else {
+                        self.log("No CLAUDE.md/AGENTS.md found in project_dir — scaffolding minimal starter...");
+                        identity::scaffold_claude_md(&self.config.persona)
+                    }
+                } else {
+                    self.log("No project_dir set — scaffolding minimal CLAUDE.md starter...");
+                    identity::scaffold_claude_md(&self.config.persona)
+                }
             }
             _ => {
                 self.log("Bootstrapping identity with behavioral definitions...");
@@ -162,8 +179,17 @@ impl LoopRunner {
         // Load held-constant context
         let held_context = load_held_context(&self.config.mode.hold_constant);
 
-        // Set up sandbox
-        let sandbox = SandboxEnvironment::new(&self.config.persona.tools)?;
+        // Set up sandbox — seed from project_dir in claude mode
+        let sandbox = match self.config.mode.target {
+            EvalMode::Claude | EvalMode::Agents => {
+                let project_dir = self.config.mode.claude.project_dir.as_deref();
+                if let Some(dir) = project_dir {
+                    self.log(format!("Seeding sandbox from project_dir: {}", dir.display()));
+                }
+                SandboxEnvironment::new_with_project(&self.config.persona.tools, project_dir)?
+            }
+            _ => SandboxEnvironment::new(&self.config.persona.tools)?,
+        };
         let allowed_tools = SandboxEnvironment::builtin_tools(&self.config.persona.tools);
         self.log(format!(
             "Sandbox ready (tools: {})",
@@ -219,7 +245,7 @@ impl LoopRunner {
 
             // Phase 2: Run cases (mode-aware)
             let case_results = match self.config.mode.target {
-                crate::types::EvalMode::Soul => {
+                EvalMode::Soul => {
                     let session_count = self.config.mode.soul.session_count;
                     self.log(format!(
                         "Running {} cases x {} sessions (max {} parallel, {} turns)...",
@@ -352,10 +378,41 @@ impl LoopRunner {
                 best_score = avg_score;
                 best_identity = current_identity.clone();
                 let best_path = match self.config.mode.target {
-                    crate::types::EvalMode::Soul => self.state_dir.best_soul_path(),
+                    EvalMode::Soul => self.state_dir.best_soul_path(),
+                    EvalMode::Claude | EvalMode::Agents => self.state_dir.best_claude_path(),
                     _ => self.state_dir.best_identity_path(),
                 };
                 identity::write_identity(&best_path, &current_identity)?;
+            }
+
+            // Run ablation testing in claude mode (once per iteration if enabled)
+            if matches!(self.config.mode.target, EvalMode::Claude | EvalMode::Agents)
+                && self.config.mode.claude.ablation
+            {
+                let sample_prompts: Vec<String> = cases
+                    .iter()
+                    .take(5)
+                    .map(|c| c.prompt.clone())
+                    .collect();
+                self.log("Running ablation pass...");
+                match ablation::run_ablation(
+                    &self.client,
+                    &current_identity,
+                    avg_score,
+                    &sample_prompts,
+                ).await {
+                    Ok(ablation_results) => {
+                        let summary = ablation::format_ablation_summary(&ablation_results);
+                        self.log(format!("Ablation complete: {} instructions tested", ablation_results.len()));
+                        // Save ablation results
+                        let ablation_json = serde_json::to_string_pretty(&ablation_results)?;
+                        std::fs::write(self.state_dir.iteration_ablation_path(iteration), &ablation_json)?;
+                        let _ = self.event_tx.send(EvalEvent::Log { message: summary });
+                    }
+                    Err(e) => {
+                        self.log(format!("Ablation pass failed (non-fatal): {}", e));
+                    }
+                }
             }
 
             // Send budget update
@@ -376,7 +433,8 @@ impl LoopRunner {
                 if let Some(reason) = convergence.check(iteration, &budget, user_stopped) {
                     // Save final identity for this iteration (mode-aware path)
                     let iter_path = match self.config.mode.target {
-                        crate::types::EvalMode::Soul => self.state_dir.iteration_soul_path(iteration),
+                        EvalMode::Soul => self.state_dir.iteration_soul_path(iteration),
+                        EvalMode::Claude | EvalMode::Agents => self.state_dir.iteration_claude_path(iteration),
                         _ => self.state_dir.iteration_identity_path(iteration),
                     };
                     identity::write_identity(&iter_path, &current_identity)?;
@@ -416,7 +474,8 @@ impl LoopRunner {
 
             // Save iteration identity (mode-aware path)
             let iter_path = match self.config.mode.target {
-                crate::types::EvalMode::Soul => self.state_dir.iteration_soul_path(iteration),
+                EvalMode::Soul => self.state_dir.iteration_soul_path(iteration),
+                EvalMode::Claude | EvalMode::Agents => self.state_dir.iteration_claude_path(iteration),
                 _ => self.state_dir.iteration_identity_path(iteration),
             };
             identity::write_identity(&iter_path, &current_identity)?;

@@ -125,6 +125,58 @@ pub async fn bootstrap_identity(
     }
 }
 
+/// Detect the project instruction file inside a project directory.
+/// Checks in order: CLAUDE.md, AGENTS.md, .claude/CLAUDE.md, .claude/AGENTS.md
+/// Returns the content and the canonical filename detected.
+pub fn detect_project_instruction_file(project_dir: &Path) -> Option<(String, String)> {
+    let candidates = [
+        "CLAUDE.md",
+        "AGENTS.md",
+        ".claude/CLAUDE.md",
+        ".claude/AGENTS.md",
+    ];
+    for candidate in &candidates {
+        let path = project_dir.join(candidate);
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let filename = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("CLAUDE.md")
+                    .to_string();
+                return Some((content, filename));
+            }
+        }
+    }
+    None
+}
+
+/// Generate a minimal CLAUDE.md scaffold when no project instruction file exists.
+pub fn scaffold_claude_md(spec: &crate::types::PersonaSpec) -> String {
+    let mut doc = String::new();
+    doc.push_str("# Project Instructions\n\n");
+    doc.push_str(&format!("This project is worked on by {}.\n\n", spec.name));
+    doc.push_str("## Conventions\n\n");
+    doc.push_str("- Follow existing code style and patterns\n");
+    doc.push_str("- Write clear, descriptive commit messages\n");
+    doc.push_str("- Run tests before committing\n\n");
+    if !spec.tools.is_empty() {
+        doc.push_str("## Preferred Tools\n\n");
+        for tool in &spec.tools {
+            doc.push_str(&format!("- Use `{}` for {}\n", tool.name, tool.description));
+        }
+        doc.push('\n');
+    }
+    if !spec.guardrails.is_empty() {
+        doc.push_str("## Guardrails\n\n");
+        for rule in &spec.guardrails {
+            doc.push_str(&format!("- {}\n", rule));
+        }
+        doc.push('\n');
+    }
+    doc
+}
+
 pub fn write_identity(path: &Path, content: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

@@ -68,6 +68,21 @@ impl StateDir {
         self.iteration_dir(iteration).join("SOUL.md")
     }
 
+    /// Best project instruction file path (claude/agents mode)
+    pub fn best_claude_path(&self) -> PathBuf {
+        self.best_dir().join("CLAUDE.md")
+    }
+
+    /// Per-iteration project instruction file path (claude/agents mode)
+    pub fn iteration_claude_path(&self, iteration: usize) -> PathBuf {
+        self.iteration_dir(iteration).join("CLAUDE.md")
+    }
+
+    /// Ablation results path for an iteration
+    pub fn iteration_ablation_path(&self, iteration: usize) -> PathBuf {
+        self.iteration_dir(iteration).join("ablation.json")
+    }
+
     pub fn history_path(&self) -> PathBuf {
         self.root.join("history.json")
     }

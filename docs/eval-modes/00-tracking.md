@@ -54,13 +54,17 @@ Each mode would have:
 
 ## Sub-Issues
 
-| # | Mode | Doc | Priority |
-|---|------|-----|----------|
-| 1 | SOUL.md | [01-soul-mode.md](./01-soul-mode.md) | High |
-| 2 | CLAUDE.md / AGENTS.md | [02-claude-mode.md](./02-claude-mode.md) | High |
-| 3 | ~~AGENTS.md~~ | Merged into #2 — CLAUDE.md and AGENTS.md are interchangeable project instruction files | — |
-| 4 | MEMORY.md | [04-memory-mode.md](./04-memory-mode.md) | Critical |
-| 5 | Skills/Plugins | [05-skills-mode.md](./05-skills-mode.md) | High |
+| # | Mode | Doc | Priority | GitHub Issue |
+|---|------|-----|----------|-------------|
+| 1 | SOUL.md | [01-soul-mode.md](./01-soul-mode.md) | High | jhbarnett/clawbake#6 |
+| 2 | CLAUDE.md / AGENTS.md | [02-claude-mode.md](./02-claude-mode.md) | High | jhbarnett/clawbake#7 |
+| 3 | ~~AGENTS.md~~ | Merged into #2 — CLAUDE.md and AGENTS.md are interchangeable project instruction files | — | — |
+| 4 | MEMORY.md | [04-memory-mode.md](./04-memory-mode.md) | **Critical** | jhbarnett/clawbake#8 |
+| 5 | Skills/Plugins | [05-skills-mode.md](./05-skills-mode.md) | High | jhbarnett/clawbake#9 |
+
+All 4 eval mode issues have been created on `jhbarnett/clawbake`. Memory mode (#8) is the highest priority — it should be picked up before Soul, Claude, or Skills modes.
+
+> **Note**: `coflounder/clawbake` has issues disabled. All Clawbake issues live on `jhbarnett/clawbake`. PRs are opened from `coflounder/clawbake` (fork) targeting `coflounder:dev`.
 
 ## Success Criteria
 
